@@ -210,8 +210,8 @@ class OpenAudioFileDialog(QtWidgets.QFileDialog):
         self.volumeSlider.setEnabled(True)
         self.volumeIcon.setEnabled(True)
 
-    def movePlayhead(self):
-        self.waveScene.setPlayhead(self.player.output.processedUSecs() / 1000000.)
+    def movePlayhead(self, secs):
+        self.waveScene.setPlayhead(secs)
 
     def accept(self):
         if self.isValid:
@@ -871,8 +871,8 @@ class AudioImportTab(QtWidgets.QWidget):
         self.waveView.setEnabled(True)
         self.waveScene.playhead.setVisible(False)
 
-    def movePlayhead(self):
-        self.waveScene.setPlayhead(self.player.output.processedUSecs() / 1000000.)
+    def movePlayhead(self, secs):
+        self.waveScene.setPlayhead(secs)
         if not self.previewMode:
             self.waveView.ensureVisible(self.waveScene.playhead)
 

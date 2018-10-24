@@ -1,9 +1,13 @@
 import sys
 from collections import namedtuple
+import datetime
+from Queue import Queue, Empty
 from math import sin, pi, sqrt
+import threading
 
 import samplerate
 import numpy as np
+import pyaudio
 from Qt import QtCore, QtGui, QtWidgets, QtMultimedia
 
 from bigglesworth.utils import loadUi, setBold, setItalic
@@ -205,9 +209,11 @@ class AudioSettingsDialog(QtWidgets.QDialog):
 class WaveIODevice(QtCore.QIODevice):
     finished = QtCore.pyqtSignal()
 
-    def __init__(self, parent):
-        QtCore.QIODevice.__init__(self, parent)
-        self.player = parent
+    def __init__(self, sampleRate, sampleSize):
+        QtCore.QIODevice.__init__(self)
+#       self.player = parent
+        self.sampleRate = sampleRate
+        self.sampleSize = sampleSize
         self.inputWaveData = np.array([])
         self.currentWaveData = np.array([])
         self.currentSampleRate = 44100
@@ -216,7 +222,8 @@ class WaveIODevice(QtCore.QIODevice):
         self.byteArray = QtCore.QByteArray()
         self.bytePos = 0
         self.clean = False
-        self.player.dirty.connect(self.setDirty)
+
+#        self.player.dirty.connect(self.setDirty)
 
     def setDirty(self):
         self.clean = False
@@ -234,13 +241,13 @@ class WaveIODevice(QtCore.QIODevice):
             return 1 + sin((volume - 1) * pi / 2)
 
     def setWaveFileData(self, waveData, info, volume):
-        if waveData is not self.inputWaveData or info.samplerate != self.player.sampleRate:
+        if waveData is not self.inputWaveData or info.samplerate != self.sampleRate:
             if waveData is not self.inputWaveData:
                 self.inputWaveData = waveData.copy()
 
-            if info.samplerate != self.player.sampleRate:
+            if info.samplerate != self.sampleRate:
                 #ratio is output/input
-                waveData = samplerate.resample(waveData, self.player.sampleRate / float(info.samplerate), 0)
+                waveData = samplerate.resample(waveData, self.sampleRate / float(info.samplerate), 0)
 
             if info.channels == 1:
                 waveData = waveData.repeat(2, axis=1)/2
@@ -265,7 +272,7 @@ class WaveIODevice(QtCore.QIODevice):
                 center = waveData[:, [4]].repeat(2, axis=1)/2
                 sub = waveData[:, [5]].repeat(2, axis=1)/2
                 waveData = front + rear + center + sub
-            if self.player.sampleSize == 16:
+            if self.sampleSize == 16:
                 waveData = (waveData * 32767).astype('int16')
             self.currentWaveData = waveData.copy()
 
@@ -290,20 +297,21 @@ class WaveIODevice(QtCore.QIODevice):
         self.open(QtCore.QIODevice.ReadOnly)
 
     def setWaveData(self, waveData, volume, preview=False):
-        if not np.array_equal(waveData, self.inputWaveData) or volume != self.currentVolume or not self.clean:
+        if not np.array_equal(waveData, self.inputWaveData) or volume != self.currentVolume: # or not self.clean:
             if preview:
                 volume = self.volumeMultiplier(volume)
                 waveData = waveData.repeat(2) * .5
             else:
                 waveData = waveData.copy()
             self.inputWaveData = waveData
-#            if self.currentSampleRate != self.player.sampleRate and self.player.sampleRate != 48000:
+#            if self.currentSampleRate != self.sampleRate and self.sampleRate != 48000:
 #                #ratio is output/input
-#                waveData = samplerate.resample(waveData, self.player.sampleRate / 48000., 0)
-            self.currentSampleRate = self.player.sampleRate
-#            if self.currentSampleSize != self.player.sampleSize or self.player.sampleSize == 16:
+#            waveData = samplerate.resample(waveData, self.sampleRate / 48000., 0)
+            self.currentSampleRate = self.sampleRate
+#            if self.currentSampleSize != self.sampleSize or self.sampleSize == 16:
+
 #                waveData = (waveData * 32768).astype('int16')
-            self.currentSampleSize = self.player.sampleSize
+            self.currentSampleSize = self.sampleSize
             if volume != self.currentVolume:
 #                waveData /= self.currentVolume
                 self.currentVolume = volume
@@ -318,7 +326,7 @@ class WaveIODevice(QtCore.QIODevice):
         self.open(QtCore.QIODevice.ReadOnly)
 
     def seekPos(self, pos):
-        self.bytePos = int(self.byteArray.size() * pos) // self.player.sampleSize * self.player.sampleSize
+        self.bytePos = int(self.byteArray.size() * pos) // self.sampleSize * self.sampleSize
 #        print(pos, self.byteArray.size())
 
     def readData(self, maxlen):
@@ -343,23 +351,134 @@ class WaveIODevice(QtCore.QIODevice):
         return data.data()
 
 
+class AudioOutput(QtCore.QThread):
+    notify = QtCore.pyqtSignal(object)
+    started = QtCore.pyqtSignal()
+    paused = QtCore.pyqtSignal()
+    stopped = QtCore.pyqtSignal()
+    queue = Queue()
+    __isPlaying = False
+    __ioSet = False
+
+    def __init__(self, audioDeviceName, sampleRate, sampleSize, chunkSize=512):
+        self.pyaudio = pyaudio.PyAudio()
+        self.chunkSize = chunkSize
+        self.sampleRate = sampleRate
+        self.sampleSize = sampleSize
+        self.timeout = 1.0 / 1000
+        
+        info = self.pyaudio.get_host_api_info_by_index(0)
+        numdevices = info.get('deviceCount')
+
+        self.audioDeviceIndex = 0
+        for self.audioDeviceIndex in range(0, numdevices):
+            device = self.pyaudio.get_device_info_by_host_api_device_index(0, self.audioDeviceIndex)
+            if device.get('maxOutputChannels') > 0: # is it an output device ?
+                name = device.get('name')
+                if name == audioDeviceName:
+                    break
+
+        super(AudioOutput, self).__init__()
+
+    def isPlaying(self):
+        return self.__isPlaying
+
+    def isPaused(self):
+        return not self.__isPlaying and self.__ioSet
+    
+    def run(self):
+        self.start_time = None
+        self.stream = self.pyaudio.open(channels=2,
+                                        format=pyaudio.paInt16,
+                                        rate=self.sampleRate,
+                                        output_device_index=self.audioDeviceIndex,
+                                        output=True)
+        self.waveIODevice = WaveIODevice(self.sampleRate, self.sampleSize)
+
+        while True:
+            try:
+                function, args, kwargs = self.queue.get(timeout=self.timeout)
+                function(*args, **kwargs)
+            except Empty:
+                pass
+            except Exception as e:
+                print 'Error', e
+
+    def playData(self, waveData, volume, preview):
+        self.__runOnThread(self._onPlayData, waveData, volume, preview)
+
+    def playFile(self, waveData, volume, info):
+        self.__runOnThread(self._onPlayFile, waveData, volume, info)
+
+    def pause(self):
+        self.__runOnThread(self._onPause)
+
+    def resume(self):
+        self.__runOnThread(self._onResume)
+        
+    def stop(self):
+        self.__runOnThread(self._onStop)
+
+    def __runOnThread(self, function, *args, **kwargs):
+        self.queue.put((function, args, kwargs))
+                
+    def _onPlayData(self, waveData, volume, preview):
+        self.start_time = datetime.datetime.now()
+        self.__isPlaying = True
+        self.__ioSet = True
+        self.waveIODevice.setWaveData(waveData, volume, preview)
+        self.started.emit()
+        self._playChunk()
+
+    def _onPlayFile(self, waveData, volume, info):
+        self.start_time = datetime.datetime.now()
+        self.__isPlaying = True
+        self.__ioSet = True
+        self.waveIODevice.setWaveFileData(waveData, info, volume)
+        self.started.emit()
+        self._playChunk()
+        
+    def _onPause(self):
+        self.__isPlaying = False
+        self.paused.emit()
+        
+    def _onResume(self):
+        self.__isPlaying = True
+        self._playChunk()
+        
+    def _onStop(self):
+        self.__isPlaying = False
+        self.__ioSet = False
+        self.waveIODevice.stop()
+        self.stopped.emit()
+
+    def _playChunk(self):
+        timeElapsed = datetime.datetime.now() - self.start_time
+        self.notify.emit(timeElapsed.total_seconds())
+
+        data = self.waveIODevice.readData(self.chunkSize)
+        self.stream.write(data)
+        if self.__isPlaying:
+            self.__runOnThread(self._playChunk)
+
+    
 class Player(QtCore.QObject):
     stateChanged = QtCore.pyqtSignal(object)
     dirty = QtCore.pyqtSignal()
 #    notify = QtCore.pyqtSignal(float)
-    started = QtCore.pyqtSignal()
-    stopped = QtCore.pyqtSignal()
-    paused = QtCore.pyqtSignal()
+#    started = QtCore.pyqtSignal()
+#    stopped = QtCore.pyqtSignal()
+#    paused = QtCore.pyqtSignal()
 
     def __init__(self, main, audioDeviceName=None, sampleRateConversion=2):
         QtCore.QObject.__init__(self)
         self.main = main
 #        self.audioBufferArray = QtCore.QBuffer(self)
-        self.waveIODevice = WaveIODevice(self)
+
         #for some reason, on windows (or Wine? and OSX?) stateChanged 
         #is not emitted at the end of file buffer...
-        if sys.platform == 'win32':
-            self.waveIODevice.finished.connect(self.checkFinished)
+#        if sys.platform == 'win32':
+#            self.waveIODevice.finished.connect(self.checkFinished)
         self.output = None
         self.audioDevice = None
         self.settings = QtCore.QSettings()
@@ -427,19 +546,22 @@ class Player(QtCore.QObject):
             del self.output
         except:
             pass
-        self.output = QtMultimedia.QAudioOutput(self.audioDevice, self.format)
 
-        self.output.setNotifyInterval(25)
-        self.output.stateChanged.connect(self.stateChanged)
-        self.output.setBufferSize(self.settings.value('BufferSize', defaultBufferSize, int))
+        self.output = AudioOutput(self.audioDevice.deviceName(), self.sampleRate, self.sampleSize)
+        self.output.start()
+        self.output.setPriority(self.output.HighestPriority)
+
         self.dirty.emit()
         self.notify = self.output.notify
+        self.started = self.output.started
+        self.paused = self.output.paused
+        self.stopped = self.output.stopped
 
     def isPlaying(self):
-        return self.output.state() == QtMultimedia.QAudio.ActiveState
+        return self.output.isPlaying()#return self.output.state() == QtMultimedia.QAudio.ActiveState
 
     def isPaused(self):
-        return self.output.state() == QtMultimedia.QAudio.SuspendedState
+        return self.output.isPaused()
 
     def isActive(self):
         return self.output.state() in (QtMultimedia.QAudio.ActiveState, QtMultimedia.QAudio.SuspendedState)
@@ -455,19 +577,15 @@ class Player(QtCore.QObject):
 
     def stop(self):
         self.output.stop()
-        self.waveIODevice.stop()
 
     def playWaveFile(self, waveData, info, volume=1):
-        self.waveIODevice.setWaveFileData(waveData, info, volume)
-#        self.output.start(self.audioBufferArray)
-        self.output.start(self.waveIODevice)
+        self.output.playFile(waveData, volume, info)
 
     def playData(self, waveData, volume=1, preview=False):
-        self.waveIODevice.setWaveData(waveData, volume, preview)
-        self.output.start(self.waveIODevice)
+        self.output.playData(waveData, volume, preview)
 
     def pause(self):
-        self.output.suspend()
+        self.output.pause()
 
     def resume(self):
         self.output.resume()

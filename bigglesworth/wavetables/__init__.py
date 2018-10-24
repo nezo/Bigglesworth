@@ -1910,11 +1910,11 @@ class WaveTableWindow(QtWidgets.QMainWindow):
             data = self.keyFrames.fullTableValues(note, 1, self.player.sampleRate, index=index, computed=self.playComputedBtn.isChecked())
             self.player.playData(data, volume=max(1, velocity) / 127.)
 
-    def setFullTablePlayhead(self):
+    def setFullTablePlayhead(self, secs):
 #        inBuffer = self.player.output.bufferSize() - self.player.output.bytesFree()
 #        usInBuffer = inBuffer * 1000000 / (2 * self.player.sampleSize / 8.) / self.player.sampleRate
 #        secs = (self.player.output.processedUSecs() - usInBuffer) / 1000000.
-        secs = self.player.output.processedUSecs() / 1000000.
+#        secs = self.player.output.processedUSecs() / 1000000.
         rest, pos = divmod(int(secs * self.keyFrames.sampleRatio), 64)
         if self.backForthChk.isChecked() and rest & 1:
             pos = 64 - pos
