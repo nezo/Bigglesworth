@@ -1,13 +1,13 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <ui version="4.0">
- <class>Dialog</class>
- <widget class="QDialog" name="Dialog">
+ <class>GlobalsDialog</class>
+ <widget class="QDialog" name="GlobalsDialog">
   <property name="geometry">
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>713</width>
-    <height>454</height>
+    <width>705</width>
+    <height>445</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -92,32 +92,6 @@
         </item>
        </widget>
       </item>
-      <item row="1" column="0">
-       <widget class="QLabel" name="label_3">
-        <property name="text">
-         <string>&amp;Contrast</string>
-        </property>
-        <property name="buddy">
-         <cstring>contrastSpin</cstring>
-        </property>
-       </widget>
-      </item>
-      <item row="1" column="1" alignment="Qt::AlignRight">
-       <widget class="QSpinBox" name="contrastSpin">
-        <property name="sizePolicy">
-         <sizepolicy hsizetype="Maximum" vsizetype="Fixed">
-          <horstretch>0</horstretch>
-          <verstretch>0</verstretch>
-         </sizepolicy>
-        </property>
-        <property name="maximum">
-         <number>127</number>
-        </property>
-        <property name="value">
-         <number>64</number>
-        </property>
-       </widget>
-      </item>
       <item row="2" column="3">
        <widget class="QLabel" name="label_16">
         <property name="text">
@@ -191,12 +165,22 @@
         </property>
        </widget>
       </item>
-      <item row="0" column="0" colspan="2">
-       <layout class="QHBoxLayout" name="horizontalLayout">
-        <property name="spacing">
-         <number>2</number>
-        </property>
-        <item>
+      <item row="0" column="0" rowspan="2" colspan="2">
+       <layout class="QGridLayout" name="gridLayout_4">
+        <item row="0" column="2">
+         <widget class="DeviceIdSpin" name="deviceIdSpin">
+          <property name="sizePolicy">
+           <sizepolicy hsizetype="Maximum" vsizetype="Fixed">
+            <horstretch>0</horstretch>
+            <verstretch>0</verstretch>
+           </sizepolicy>
+          </property>
+          <property name="maximum">
+           <number>127</number>
+          </property>
+         </widget>
+        </item>
+        <item row="0" column="0">
          <widget class="QLabel" name="label_21">
           <property name="text">
            <string>Device &amp;ID</string>
@@ -206,7 +190,7 @@
           </property>
          </widget>
         </item>
-        <item>
+        <item row="0" column="1">
          <widget class="QLabel" name="deviceIdLbl">
           <property name="enabled">
            <bool>false</bool>
@@ -222,8 +206,8 @@
           </property>
          </widget>
         </item>
-        <item alignment="Qt::AlignRight">
-         <widget class="DeviceIdSpin" name="deviceIdSpin">
+        <item row="1" column="2">
+         <widget class="QSpinBox" name="contrastSpin">
           <property name="sizePolicy">
            <sizepolicy hsizetype="Maximum" vsizetype="Fixed">
             <horstretch>0</horstretch>
@@ -232,6 +216,19 @@
           </property>
           <property name="maximum">
            <number>127</number>
+          </property>
+          <property name="value">
+           <number>64</number>
+          </property>
+         </widget>
+        </item>
+        <item row="1" column="0" colspan="2">
+         <widget class="QLabel" name="label_3">
+          <property name="text">
+           <string>&amp;Contrast</string>
+          </property>
+          <property name="buddy">
+           <cstring>contrastSpin</cstring>
           </property>
          </widget>
         </item>
@@ -246,7 +243,7 @@
       <bool>false</bool>
      </property>
      <property name="title">
-      <string>MIDI settings</string>
+      <string>MIDI</string>
      </property>
      <layout class="QGridLayout" name="gridLayout_2" columnstretch="2,0,0,2,0">
       <item row="2" column="1">
@@ -550,7 +547,7 @@ Firmware version:</string>
      <item row="1" column="0">
       <widget class="QLabel" name="label_23">
        <property name="text">
-        <string>&amp;Device ID</string>
+        <string>&amp;Device ID to query</string>
        </property>
        <property name="buddy">
         <cstring>queryDeviceIdSpin</cstring>
@@ -634,7 +631,7 @@ Firmware version:</string>
       <enum>Qt::Horizontal</enum>
      </property>
      <property name="standardButtons">
-      <set>QDialogButtonBox::Apply|QDialogButtonBox::Cancel|QDialogButtonBox::Ok</set>
+      <set>QDialogButtonBox::Apply|QDialogButtonBox::Cancel|QDialogButtonBox::Help|QDialogButtonBox::Ok</set>
      </property>
     </widget>
    </item>
@@ -764,6 +761,9 @@ Firmware version:</string>
           <horstretch>0</horstretch>
           <verstretch>0</verstretch>
          </sizepolicy>
+        </property>
+        <property name="suffix">
+         <string>Hz</string>
         </property>
         <property name="minimum">
          <number>54</number>
@@ -938,7 +938,6 @@ Firmware version:</string>
   <tabstop>freeBtnCombo</tabstop>
   <tabstop>deviceIdSpin</tabstop>
   <tabstop>autoEditChk</tabstop>
-  <tabstop>contrastSpin</tabstop>
   <tabstop>popupSpin</tabstop>
   <tabstop>velocityCombo</tabstop>
   <tabstop>pedalCombo</tabstop>
@@ -959,7 +958,7 @@ Firmware version:</string>
   <connection>
    <sender>buttonBox</sender>
    <signal>accepted()</signal>
-   <receiver>Dialog</receiver>
+   <receiver>GlobalsDialog</receiver>
    <slot>accept()</slot>
    <hints>
     <hint type="sourcelabel">
@@ -975,7 +974,7 @@ Firmware version:</string>
   <connection>
    <sender>buttonBox</sender>
    <signal>rejected()</signal>
-   <receiver>Dialog</receiver>
+   <receiver>GlobalsDialog</receiver>
    <slot>reject()</slot>
    <hints>
     <hint type="sourcelabel">

@@ -8,7 +8,7 @@ from Qt import QtCore, QtGui, QtWidgets
 
 #from PyQt4 import uic
 from bigglesworth.utils import loadUi, localPath, getName
-from bigglesworth.const import ord2chr, LogInfo, LogWarning, factoryPresetsNames
+from bigglesworth.const import ord2chr, LogInfo, LogWarning, factoryPresets, factoryPresetsNames
 from bigglesworth.midiutils import SysExEvent, INIT, END, SYSEX
 from bigglesworth.parameters import categories
 #from bigglesworth.widgets import MidiConnectionWidget
@@ -18,7 +18,7 @@ class CollectionValidator(QtGui.QValidator):
     def __init__(self, collections):
         QtGui.QValidator.__init__(self)
         self.baseValidator = QtGui.QRegExpValidator(QtCore.QRegExp(r'^(?!.* {2})(?=\S)[a-zA-Z0-9\ \-\_]+$'))
-        self.collections = [c.lower() for c in collections]
+        self.collections = [c.lower() for c in collections] + ['uid', 'tags'] + factoryPresets
 
     def validate(self, text, pos):
         if not text:
@@ -173,15 +173,17 @@ class AutoconnectPage(QtWidgets.QWizardPage):
         else:
             model = 'Unknown'
         if sysex[8:10] == [0, 0]:
-            devType = 'Blofeld Desktop'
+#            devType = 'Blofeld Desktop'
             self.setBlofeldImage('dt')
         else:
-            devType = 'Blofeld Keyboard'
+#            devType = 'Blofeld Keyboard'
             self.setBlofeldImage('kb')
         dev_version = ''.join([ord2chr[l] for l in sysex[10:14]]).strip()
         self.log('&nbsp;Found!', True, True)
-        self.log('<br/>Device info:<br/><br/>Manufacturer: {}<br/>Model: {}<br/>Type: {}<br/>Firmware version: {}'.format(
-            manufacturer, model, devType, dev_version), True, True)
+#        self.log('<br/>Device info:<br/><br/>Manufacturer: {}<br/>Model: {}<br/>Type: {}<br/>Firmware version: {}'.format(
+#            manufacturer, model, devType, dev_version), True, True)
+        self.log('<br/>Device info:<br/><br/>Manufacturer: {}<br/>Model: {}<br/>Firmware version: {}'.format(
+            manufacturer, model, dev_version), True, True)
         src = self.graph.port_id_dict[event.source[0]][event.source[1]]
         self.found.emit(True, src, self.bloTesting if self.bloTesting else self.tested[-1])
 

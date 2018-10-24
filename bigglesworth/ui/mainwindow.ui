@@ -34,6 +34,9 @@
        <bool>false</bool>
       </property>
       <widget class="LeftTabWidget" name="leftTabWidget">
+       <property name="acceptDrops">
+        <bool>true</bool>
+       </property>
        <property name="currentIndex">
         <number>-1</number>
        </property>
@@ -42,6 +45,9 @@
        </property>
       </widget>
       <widget class="RightTabWidget" name="rightTabWidget">
+       <property name="acceptDrops">
+        <bool>true</bool>
+       </property>
        <property name="tabsClosable">
         <bool>true</bool>
        </property>
@@ -60,7 +66,7 @@
     </item>
    </layout>
   </widget>
-  <widget class="QMenuBar" name="menubar">
+  <widget class="MenuBar" name="menubar">
    <property name="geometry">
     <rect>
      <x>0</x>
@@ -130,6 +136,7 @@
     <addaction name="separator"/>
     <addaction name="showSettingsAction"/>
     <addaction name="showGlobalsAction"/>
+    <addaction name="showFirmwareUtilsAction"/>
    </widget>
    <addaction name="fileMenu"/>
    <addaction name="libraryMenu"/>
@@ -237,8 +244,11 @@
    </property>
   </action>
   <action name="showGlobalsAction">
+   <property name="icon">
+    <iconset theme="blofeld-b"/>
+   </property>
    <property name="text">
-    <string>Blofeld &amp;device</string>
+    <string>&amp;Blofeld device query</string>
    </property>
   </action>
   <action name="aboutQtAction">
@@ -313,6 +323,11 @@
    </property>
   </action>
   <action name="showMidiChartAction">
+   <property name="icon">
+    <iconset theme="midi">
+     <normaloff/>
+    </iconset>
+   </property>
    <property name="text">
     <string>MIDI implementation chart...</string>
    </property>
@@ -336,10 +351,26 @@
    <property name="text">
     <string>Show library sidebar</string>
    </property>
+   <property name="shortcut">
+    <string>Ctrl+L</string>
+   </property>
   </action>
   <action name="toggleDualViewAction">
    <property name="text">
     <string>Open twin tab view</string>
+   </property>
+   <property name="shortcut">
+    <string>Ctrl+D</string>
+   </property>
+  </action>
+  <action name="showFirmwareUtilsAction">
+   <property name="icon">
+    <iconset theme="circuit">
+     <normaloff/>
+    </iconset>
+   </property>
+   <property name="text">
+    <string>&amp;Firmware utilities</string>
    </property>
   </action>
  </widget>
@@ -384,6 +415,11 @@
    <extends>QWidget</extends>
    <header>bigglesworth.widgets</header>
    <container>1</container>
+  </customwidget>
+  <customwidget>
+   <class>MenuBar</class>
+   <extends>QMenuBar</extends>
+   <header>bigglesworth.widgets</header>
   </customwidget>
  </customwidgets>
  <resources/>

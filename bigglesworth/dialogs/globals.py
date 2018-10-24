@@ -3,6 +3,7 @@ from Qt import QtCore, QtGui, QtWidgets
 from bigglesworth.utils import loadUi, localPath
 from bigglesworth.const import ord2chr, INIT, IDE, IDW, GLBD, GLBR, END
 from bigglesworth.midiutils import SysExEvent, SYSEX
+from bigglesworth.widgets import MidiConnectionsDialog
 #from bigglesworth.widgets import DeltaSpin, DeviceIdSpin
 
 
@@ -99,11 +100,12 @@ class GlobalsWaiter(QtWidgets.QDialog):
 
 class GlobalsDialog(QtWidgets.QDialog):
     midiEvent = QtCore.pyqtSignal(object)
+    helpRequested = QtCore.pyqtSignal()
 
-    def __init__(self, main, parent=None):
+    def __init__(self, parent=None):
         QtWidgets.QDialog.__init__(self, parent)
         loadUi(localPath('ui/globals.ui'), self)
-        self.main = main
+        self.main = QtWidgets.QApplication.instance()
         self.waiter = GlobalsWaiter(self)
         self.waiter.rejected.connect(self.invalid)
         self.tuneSpin.delta = 376
@@ -115,6 +117,7 @@ class GlobalsDialog(QtWidgets.QDialog):
         self.deviceIdSpin.valueChanged.connect(lambda value: self.deviceIdLbl.setText('({:02X}h)'.format(value)))
 
         self.queryHexLbl.setMinimumWidth(self.fontMetrics().width('(000h)'))
+        self.deviceIdLbl.setMinimumWidth(self.queryHexLbl.minimumWidth())
 
         self.queryBtn.clicked.connect(self.startQuery)
 
@@ -151,9 +154,14 @@ class GlobalsDialog(QtWidgets.QDialog):
             self.channelSpin, self.ctrlWSpin, self.ctrlXSpin, self.ctrlYSpin, self.ctrlZSpin):
             spin.valueChanged.connect(self.editData)
 
+        self.midiConnectionsBtn = QtWidgets.QPushButton(QtGui.QIcon.fromTheme('midi'), 'MIDI connections')
+        self.buttonBox.layout().insertWidget(0, self.midiConnectionsBtn)
+        self.midiConnectionsBtn.clicked.connect(lambda: MidiConnectionsDialog(self).exec_())
         self.okBtn = self.buttonBox.button(self.buttonBox.Ok)
         self.applyBtn = self.buttonBox.button(self.buttonBox.Apply)
         self.applyBtn.clicked.connect(self.apply)
+        self.buttonBox.button(self.buttonBox.Help).clicked.connect(self.helpRequested)
+
         self.data = None
         self.originalData = []
 
@@ -172,7 +180,7 @@ class GlobalsDialog(QtWidgets.QDialog):
         self.sysex[-2] = 0x7f
         self.midiEvent.emit(SysExEvent(1, self.sysex))
 
-        QtCore.QTimer.singleShot(100, self.startQuery)
+        QtCore.QTimer.singleShot(500, self.startQuery)
         res = self.waiter.exec_(True)
         if not res or not self.waiter.result():
             return False
@@ -203,7 +211,10 @@ class GlobalsDialog(QtWidgets.QDialog):
             QtWidgets.QMessageBox.warning(
                 self, 
                 'Device timeout', 
-                'The request has timed out.\nEnsure that the Blofeld is correctly connected to both MIDI input and output ports', 
+                'The request has timed out.<br/>Ensure that the Blofeld is correctly connected ' \
+                'to both MIDI input and output ports, and the "&Device ID to query" is correctly ' \
+                'set.<br/>If you don\'t know the Device ID, press the "Broadcast" button to query ' \
+                'any available device.', 
                 QtWidgets.QMessageBox.Ok)
 
     def startQuery(self, deviceId=False):
@@ -230,8 +241,8 @@ class GlobalsDialog(QtWidgets.QDialog):
         self.okBtn.setEnabled(state)
         self.applyBtn.setEnabled(state if state and self.data != self.originalData else False)
 
-    def midiConnEvent(self, *args):
-        enabled = True if all(self.main.connections) else False
+    def midiConnChanged(self, *args):
+        enabled = all(args)
         self.queryBtn.setEnabled(enabled)
         self.enableWidgets(True if enabled and self.wasEnabled else False)
 
@@ -257,14 +268,14 @@ class GlobalsDialog(QtWidgets.QDialog):
             dev_model = 'Blofeld'
         else:
             dev_model = 'Unknown'
-        if sysex[8:10] == [0, 0]:
-            dev_type = 'Blofeld Desktop'
-        else:
-            dev_type = 'Blofeld Keyboard'
+#        if sysex[8:10] == [0, 0]:
+#            dev_type = 'Blofeld Desktop'
+#        else:
+#            dev_type = 'Blofeld Keyboard'
         dev_version = ''.join([ord2chr[l] for l in sysex[10:14]]).strip()
         
-        self.deviceLbl.setText('Device info:\n\nManufacturer: {}\nModel: {}\nType: {}\nFirmware version: {}'.format(
-            dev_man, dev_model, dev_type, dev_version))
+        self.deviceLbl.setText('Manufacturer: {}\nModel: {}\nFirmware version: {}'.format(
+            dev_man, dev_model, dev_version))
         QtCore.QTimer.singleShot(200, self.globalsQuery)
 
     def midiEventReceived(self, event):
@@ -274,6 +285,9 @@ class GlobalsDialog(QtWidgets.QDialog):
                 self.globalsResponse(event.sysex)
             elif len(event.sysex) == 15 and event.sysex[3:5] == [6, 2]:
                 self.deviceResponse(event.sysex)
+            else:
+                return
+            self.main.blockPortForward(event.source, apply=True)
 
     def exec_(self):
         self.queryDeviceIdSpin.setValue(self.main.blofeldId)

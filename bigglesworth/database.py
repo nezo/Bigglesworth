@@ -5,24 +5,30 @@ import string
 import uuid
 import json
 import re
+from xml.etree import ElementTree as ET
 #from threading import Lock
 
 from Qt import QtCore, QtGui, QtSql
 QtCore.pyqtSignal = QtCore.Signal
 
-from bigglesworth.utils import Enum, localPath, getName, getSizeStr, elapsedFrom
+from bigglesworth.utils import Enum, localPath, getName, getSizeStr, elapsedFrom, getValidQColor
 from bigglesworth.parameters import Parameters, oscShapes, categories
 from bigglesworth.libs import midifile
-from bigglesworth.const import factoryPresets, NameColumn, chr2ord, LogInfo, LogWarning, LogCritical, LogFatal, LogDebug
+from bigglesworth.const import (factoryPresets, NameColumn, chr2ord, backgroundRole, foregroundRole, 
+    LogInfo, LogWarning, LogCritical, LogFatal, LogDebug)
 from bigglesworth.library import CollectionModel, LibraryModel
 from bigglesworth.backup import BackUp
 
 renameRegExp = re.compile(r'^(?=.{16}$)(?P<name>.*)~(?P<count>[1-9][0-9]{0,2}){0,1} *$')
-_parameterList = []
+parameterList = Parameters.parameterList
+validParameterList = Parameters.validParameterList
+indexedValidParameterList = Parameters.indexedValidParameterList
 soundsColumns = []
 soundsDef = '('
 for p in Parameters.parameterData:
-    _parameterList.append(p.attr)
+#    parameterList.append(p.attr)
+#    if not p.attr.startswith('reserved'):
+#        validParameterList.append(validParameterList)
     soundsColumns.append(p.attr)
     soundsDef += '{} int, '.format(p.attr)
 
@@ -31,6 +37,15 @@ soundsColumns.append('uid')
 soundsDef += 'uid varchar primary key)'
 referenceColumns = ['uid', 'tags', 'blofeld_fact_200801', 'blofeld_fact_200802', 'blofeld_fact_201200', 'Blofeld']
 referenceDef = '(uid varchar primary key, tags varchar, blofeld_fact_200801 int, blofeld_fact_200802 int, blofeld_fact_201200 int, Blofeld int)'
+
+
+def splitter(uidList, limit=500):
+    splitList = uidList[:limit]
+    delta = 0
+    while splitList:
+        yield splitList
+        delta += 1
+        splitList = uidList[limit * delta: limit * (delta + 1)]
 
 
 class BlofeldDB(QtCore.QObject):
@@ -46,6 +61,7 @@ class BlofeldDB(QtCore.QObject):
     backupFinished = QtCore.pyqtSignal()
     backupError = QtCore.pyqtSignal(str)
     factoryStatus = QtCore.pyqtSignal(str, int)
+    wavetableStatus = QtCore.pyqtSignal(str, int)
 
     def __init__(self, main):
         QtCore.QObject.__init__(self)
@@ -298,6 +314,76 @@ class BlofeldDB(QtCore.QObject):
                 self.sql.commit()
                 self.logger.append(LogDebug, 'Reference table successfully reordered')
 
+            self.logger.append(LogDebug, 'Checking collection consistency')
+            self.query.exec_('PRAGMA table_info(reference)')
+            collections = []
+            while self.query.next():
+                collections.append(self.query.value(1))
+            valid = True
+            duplicatePrepareStr = 'SELECT uid FROM sounds WHERE {} AND :collection IS NOT NULL'.format(
+                ' AND '.join('{0}=:{0}'.format(param) for param in validParameterList))
+            for collection in collections[2:]:
+                self.query.exec_('SELECT uid,"{0}" FROM reference WHERE "{0}" IS NOT NULL'.format(collection))
+                items = []
+                while self.query.next():
+                    items.append((self.query.value(0), self.query.value(1)))
+                count = len(items)
+                if count > 1024:
+                    self.sql.transaction()
+                    self.dbErrorLog('Collection "{}" too big, trimming down to 1024'.format(collection), 
+                        extMessage='{} sounds'.format(count), logLevel=LogWarning)
+                    for splitted in splitter([uid for uid, index in items[1024:]], 500):
+                        where = ' OR '.join('uid="{}"'.format(uid) for uid in splitted)
+                        if not self.query.exec_('UPDATE reference SET "{}"=NULL WHERE {}'.format(collection, where)):
+                            self.dbErrorLog('Error trimming too big collection', extMessage=collection)
+                            valid = False
+                            self.sql.rollback()
+                            break
+                        for uid in splitted:
+                            values = self.getSoundDataFromUid(uid, onlyValid=True)
+                            self.query.prepare(duplicatePrepareStr)
+                            self.query.bindValue(':collection', collection)
+                            for param, value in zip(validParameterList, values):
+                                self.query.bindValue(':{}'.format(param), value)
+                            if not self.query.exec_():
+                                self.dbErrorLog('Error checking duplicates for trimming')
+                                valid = False
+                                self.sql.rollback()
+                                break
+                            if self.query.next() and self.query.value(0):
+                                #remove duplicate sounds (probably added in previous bugged versions)
+                                if not self.query.exec_('DELETE FROM reference WHERE uid="{}"'.format(uid)):
+                                    self.dbErrorLog('Error removing duplicate from reference for trimming', extMessage=uid)
+                                    self.sql.rollback()
+                                    break
+                                if not self.query.exec_('DELETE FROM sounds WHERE uid="{}"'.format(uid)):
+                                    self.dbErrorLog('Error removing duplicate from sounds for trimming', extMessage=uid)
+                                    self.sql.rollback()
+                                    break
+                    else:
+                        self.sql.commit()
+                        self.logger.append(LogDebug, 'Collection "{}" successfully resized'.format(collection))
+                elif len(set(items)) != count:
+                    self.dbErrorLog('Duplicate indexes found in "{}", purging'.format(collection), logLevel=LogWarning)
+                    indexes = set()
+                    duplicates = []
+                    for uid, index in items:
+                        if index not in indexes:
+                            indexes.add(index)
+                        else:
+                            duplicates.append(uid)
+                    for splitted in splitter(duplicates):
+                        where = ' OR '.join('uid="{}"'.format(uid) for uid in splitted)
+                        if not self.query.exec_('UPDATE reference SET "{}"=NULL WHERE {}'.format(collection, where)):
+                            self.dbErrorLog('Error trimming too big collection', extMessage=collection)
+                            valid = False
+                            break
+                    else:
+                        self.logger.append(LogDebug, 'Collection "{}" successfully fixed'.format(collection))
+                else:
+                    self.logger.append(LogDebug, 'Collection "{}" checked with {}errors'.format(collection, ('', 'no ')[valid]), 
+                        extMessage='{} sound{}'.format(count, '' if count == 1 else 's'))
+
         self.logger.append(LogDebug, 'Checking templates table')
 #        self.query.exec_('PRAGMA table_info(templates)')
         if not 'templates' in tables:
@@ -362,8 +448,26 @@ class BlofeldDB(QtCore.QObject):
         self.logger.append(LogDebug, 'Checking dumped wavetables table')
         if not 'dumpedwt' in tables:
             self.logger.append(LogDebug, 'Preparing creation of dumped wavetables table')
-            self.query.exec_('CREATE TABLE dumpedwt(uid varchar, name varchar(14), slot int primary key, edited int, data blob, preview blob, dumped int)')
+            self.query.exec_('CREATE TABLE dumpedwt(uid varchar, name varchar(14), slot int primary key, edited int, data blob, preview blob, dumped int, writable int)')
             createBit |= self.WaveTablesEmpty
+        else:
+            self.logger.append(LogDebug, 'Updating dumped wavetable columns')
+            self.query.exec_('PRAGMA table_info(dumpedwt)')
+            columns = []
+            while self.query.next():
+                columns.append(self.query.value(1))
+            if not 'writable' in columns:
+                if not self.query.exec_('ALTER TABLE dumpedwt ADD COLUMN "writable" int'):
+                    self.dbErrorLog('Error updating dumped wavetable columns')
+                elif not self.query.exec_('UPDATE dumpedwt SET writable=1 WHERE slot BETWEEN 80 AND 118'):
+                    self.dbErrorLog('Error updating dumped wavetable writable column')
+
+            self.query.exec_('SELECT slot, data, preview FROM dumpedwt WHERE (data IS NULL OR preview IS NULL) AND slot != 0 and slot < 67')
+            toCheck = []
+            while self.query.next():
+                toCheck.append((self.query.value(0), self.query.value(1),  self.query.value(2)))
+            if toCheck:
+                self.updateWavetablePresets(toCheck)
 
         if createBit:
             self.logger.append(LogWarning, 'Reference and sound tables empty', 'createBit: {}'.format(createBit))
@@ -389,8 +493,10 @@ class BlofeldDB(QtCore.QObject):
                 self.logger.append(LogCritical, 'Unknown error creating reference', 'createBit: {}'.format(createBit))
                 self.lastError = createBit
                 return False
+
         self.logger.append(LogInfo, 'Reference/sounds completed successfully!')
         return True
+
 
     def initializeFactory(self, createBit):
         self.logger.append(LogInfo, 'Filling factory presets')
@@ -437,6 +543,7 @@ class BlofeldDB(QtCore.QObject):
                             self.logger.append(LogDebug, 'starting bank ' + bank)
                             self.factoryStatus.emit(preset, data[0])
                             print('starting bank ' + bank)
+
             self.query.exec_('PRAGMA journal_mode=DELETE')
             self.referenceModel.refresh()
 
@@ -444,27 +551,129 @@ class BlofeldDB(QtCore.QObject):
             self.initializeWavetables()
 
     def initializeWavetables(self):
+        def getPreview(slot):
+            if not slot:
+                return None
+            if slot in baseShapes:
+                return baseShapes[slot]
+            if slot in wavetableMap:
+                stream = QtCore.QDataStream(wavetableMap[slot], QtCore.QIODevice.ReadOnly)
+                stream.readInt()
+                snapshot = stream.readQVariant()
+                keyFrames.setSnapshot(snapshot)
+                return virtualScene.getPreview()
+            return None
+
         from bigglesworth.wavetables.utils import getOscPaths
-        self.query.prepare('INSERT INTO dumpedwt(uid, name, slot,preview) VALUES("blofeld", :name, :slot, :preview)')
-        shapes = getOscPaths()
+        from bigglesworth.wavetables.keyframes import VirtualKeyFrames
+        from bigglesworth.wavetables.graphics import VirtualWaveTableScene
+
+        keyFrames = VirtualKeyFrames()
+        virtualScene = VirtualWaveTableScene(keyFrames)
+        baseShapes = getOscPaths()
+        wavetableMap = self.getWavetablePresetData()
+
+        self.query.prepare('INSERT INTO dumpedwt(uid, name, slot, data, preview) VALUES("blofeld", :name, :slot, :data, :preview)')
         for slot in range(7):
-            self.query.bindValue(':name', oscShapes[slot])
+            name = oscShapes[slot]
+            self.wavetableStatus.emit(name, slot)
+            self.query.bindValue(':name', name)
             self.query.bindValue(':slot', -slot)
-            self.query.bindValue(':preview', shapes.get(slot))
+            self.query.bindValue(':data', wavetableMap[slot] if slot else None)
+            self.query.bindValue(':preview', getPreview(slot))
             if not self.query.exec_():
                 print(self.query.lastError().databaseText())
-        self.query.prepare('INSERT INTO dumpedwt(uid, name, slot) VALUES("blofeld", :name, :slot)')
         for slot in range(7, 86):
-            self.query.bindValue(':name', oscShapes[slot])
+            name = oscShapes[slot]
+            self.wavetableStatus.emit(name, slot)
+            self.query.bindValue(':name', name)
             self.query.bindValue(':slot', slot - 6)
+            self.query.bindValue(':data', wavetableMap[slot] if slot <= 72 else None)
+            self.query.bindValue(':preview', getPreview(slot))
             if not self.query.exec_():
                 print(self.query.lastError().databaseText())
-        self.query.prepare('INSERT INTO dumpedwt(name, slot) VALUES(:name, :slot)')
+        self.query.prepare('INSERT INTO dumpedwt(name, slot, writable) VALUES(:name, :slot, 1)')
         for slot in range(86, 125):
-            self.query.bindValue(':name', oscShapes[slot])
+            name = oscShapes[slot]
+            self.wavetableStatus.emit(name, slot)
+            self.query.bindValue(':name', name)
             self.query.bindValue(':slot', slot - 6)
             if not self.query.exec_():
                 print(self.query.lastError().databaseText())
+
+    def updateWavetablePresets(self, data):
+        if not data:
+            return
+        self.logger.append(LogDebug, 'Preset wavetable data missing or incomplete', extMessage=len(data))
+
+        def getPreview(slot):
+            if not slot:
+                return None
+            if slot in baseShapes:
+                return baseShapes[slot]
+            if slot in wavetableMap:
+                stream = QtCore.QDataStream(wavetableMap[slot], QtCore.QIODevice.ReadOnly)
+                stream.readInt()
+                snapshot = stream.readQVariant()
+                keyFrames.setSnapshot(snapshot)
+                return virtualScene.getPreview()
+            return None
+
+        from bigglesworth.wavetables.utils import getOscPaths
+        from bigglesworth.wavetables.keyframes import VirtualKeyFrames
+        from bigglesworth.wavetables.graphics import VirtualWaveTableScene
+
+        keyFrames = VirtualKeyFrames()
+        virtualScene = VirtualWaveTableScene(keyFrames)
+        baseShapes = getOscPaths()
+        wavetableMap = self.getWavetablePresetData()
+
+        slots = []
+        for slot, data, preview in data:
+            self.query.prepare('UPDATE dumpedwt SET data=:data, preview=:preview WHERE slot={}'.format(slot))
+            if slot < 0:
+                slot = abs(slot)
+            else:
+                slot += 6
+            if not data:
+                data = wavetableMap[slot] if slot else None
+            self.query.bindValue(':data', data)
+            if not preview:
+                preview = getPreview(slot)
+            self.query.bindValue(':preview', preview)
+            if not self.query.exec_():
+                self.dbErrorLog('Error updating preset wavetable data', extMessage=slot)
+                return
+            slots.append(oscShapes[slot])
+        self.logger.append(LogDebug, 'Wavetable preset data successfully updated', extMessage=', '.join(slots))
+
+    def getWavetablePresetData(self):
+        file = QtCore.QFile(localPath('presets/wavetables.bwt'))
+        file.open(QtCore.QIODevice.ReadOnly)
+        stream = QtCore.QDataStream(file)
+        rawXml = stream.readString()
+        data = []
+        while not stream.atEnd():
+            data.append(stream.readQVariant())
+
+        root = ET.fromstring(rawXml)
+        if root.tag != 'Bigglesworth' and not 'WaveTableData' in root.getchildren():
+            return
+        typeElement = root.find('WaveTableData')
+        iterData = iter(data)
+        wavetableMap = {}
+        for wtElement in typeElement.findall('WaveTable'):
+            slot = int(wtElement.find('Slot').text)
+            waveCount = int(wtElement.find('WaveCount').text)
+
+            byteArray = QtCore.QByteArray()
+            stream = QtCore.QDataStream(byteArray, QtCore.QIODevice.WriteOnly)
+            stream.writeInt(waveCount)
+            stream.writeQVariant(iterData.next())
+
+            wavetableMap[slot] = byteArray
+
+        return wavetableMap
 
     def getTemplatesByName(self, name=None):
         templates = {}
@@ -489,9 +698,7 @@ class BlofeldDB(QtCore.QObject):
             if not set(groups) & set(templateGroups):
                 continue
             params = []
-            for id, attr in enumerate(_parameterList):
-                if attr.startswith('reserved'):
-                    continue
+            for id, attr in indexedValidParameterList:
                 value = self.query.value(id)
                 try:
                     params.append((attr, int(value)))
@@ -535,7 +742,7 @@ class BlofeldDB(QtCore.QObject):
         tempPre = 'INSERT INTO templates('
         tempPost = 'VALUES('
         updateStr = 'UPDATE templates SET '
-        for p in _parameterList:
+        for p in parameterList:
             tempPre += p + ', '
             tempPost += ':' + p
             updateStr += '{}=:{}, '.format(p, p)
@@ -549,7 +756,7 @@ class BlofeldDB(QtCore.QObject):
                 self.query.prepare(updateStr)
             else:
                 self.query.prepare(insertStr)
-            for p, value in zip(_parameterList, valueList):
+            for p, value in zip(parameterList, valueList):
                 self.query.bindValue(':' + p, value)
             self.query.bindValue(':name', name)
             self.query.bindValue(':groups', json.dumps(groups))
@@ -559,6 +766,15 @@ class BlofeldDB(QtCore.QObject):
                 return False
         self.sql.commit()
         return True
+
+    def getTagColors(self, tag):
+        res = self.tagsModel.match(self.tagsModel.index(0, 0), QtCore.Qt.DisplayRole, tag, flags=QtCore.Qt.MatchExactly)
+        if res:
+            tagIndex = res[0]
+            bgd = getValidQColor(tagIndex.sibling(tagIndex.row(), 1).data(), backgroundRole)
+            fgd = getValidQColor(tagIndex.sibling(tagIndex.row(), 2).data(), foregroundRole)
+            return bgd, fgd
+        return None
 
     def addBatchRawSoundData(self, dataDict, collection=None, overwrite=False):
         self.logger.append(LogDebug, 'Adding batch raw data to library')
@@ -700,15 +916,15 @@ class BlofeldDB(QtCore.QObject):
             return False
         return True
 
-    def getSoundDataFromUid(self, uid):
-#        print(uid)
-        if not self.query.exec_('SELECT {} FROM sounds WHERE uid = "{}"'.format(','.join(Parameters.parameterList), uid)):
+    def getSoundDataFromUid(self, uid, onlyValid=False):
+        params = ','.join(validParameterList if onlyValid else parameterList)
+        if not self.query.exec_('SELECT {} FROM sounds WHERE uid = "{}"'.format(params, uid)):
             self.dbErrorLog('Error getting sound data from uid', extMessage=uid)
             return False
         self.query.first()
         if not isinstance(self.query.value(0), (int, long)):
             return False
-        return map(int, [self.query.value(v) for v in range(383)])
+        return map(int, [self.query.value(v) for v in range(len(validParameterList if onlyValid else parameterList))])
 
     def getIndexesFromUidList(self, uidList, collection):
         if not self.query.exec_('SELECT "{}" FROM reference WHERE {}'.format(
@@ -849,7 +1065,6 @@ class BlofeldDB(QtCore.QObject):
                     continue
                 collections.append(collection)
         return collections
-        
 
     def getNamesFromUidList(self, uidList):
         nameList = []
@@ -918,9 +1133,9 @@ class BlofeldDB(QtCore.QObject):
         return True
 
     def updateSound(self, uid, parameters):
-        fieldList = ', '.join(['{}=:{}'.format(p, p) for p in _parameterList])
+        fieldList = ', '.join(['{}=:{}'.format(p, p) for p in parameterList])
         self.query.prepare('UPDATE sounds SET {} WHERE uid="{}"'.format(fieldList, uid))
-        for p, value in zip(_parameterList, parameters):
+        for p, value in zip(parameterList, parameters):
             self.query.bindValue(':{}'.format(p), int(value))
         if not self.query.exec_():
             self.dbErrorLog('Error updating sound values', extMessage=uid)
@@ -1011,7 +1226,7 @@ class BlofeldDB(QtCore.QObject):
         self.tagsModel.removeRow(res[0].row())
         return self.tagsModel.submitAll()
 
-    def createCollection(self, name, source=None):
+    def createCollection(self, name, source=None, iconName=None, initBanks=None):
         if not self.query.exec_(u'ALTER TABLE reference ADD COLUMN "{}" int'.format(name)):
             self.dbErrorLog('Error creating collection', extMessage=(name))
             return False
@@ -1028,11 +1243,11 @@ class BlofeldDB(QtCore.QObject):
                 self.sql.transaction()
                 self.dbErrorLog('Creating duplicates from factory', LogDebug, extMessage=source)
 
-                fieldList = [':{}'.format(p) for p in _parameterList]
-                prepareStr = 'SELECT {}, reference.tags FROM sounds,reference WHERE sounds.uid=:uid AND reference.uid=:uid2'.format(', '.join('sounds.' + p for p in _parameterList))
+                fieldList = [':{}'.format(p) for p in parameterList]
+                prepareStr = 'SELECT {}, reference.tags FROM sounds,reference WHERE sounds.uid=:uid AND reference.uid=:uid2'.format(', '.join('sounds.' + p for p in parameterList))
                 reader = QtSql.QSqlQuery()
                 reader.prepare(prepareStr)
-                insertPrepare = 'INSERT INTO sounds({}, uid) VALUES({}, :uid)'.format(', '.join(_parameterList), ', '.join(fieldList))
+                insertPrepare = 'INSERT INTO sounds({}, uid) VALUES({}, :uid)'.format(', '.join(parameterList), ', '.join(fieldList))
 
                 for index, uid in enumerate(uidList):
                     reader.prepare(prepareStr)
@@ -1067,8 +1282,27 @@ class BlofeldDB(QtCore.QObject):
                         print(index)
                 self.sql.commit()
                 self.dbErrorLog('Factory cloned successfully', LogDebug)
+        elif initBanks is not None:
+            self.initBanks(initBanks, name)
+
+        if iconName is not None:
+            self.main.settings.beginGroup('CollectionIcons')
+            self.main.settings.setValue(name, iconName)
+            self.main.settings.endGroup()
+
         self.referenceModel.refresh()
         return True
+
+    def initBanks(self, banks, collection, allSlots=True):
+        dataDict = {}
+        data = [p.default for p in Parameters.parameterData]
+        ignore = self.getIndexesForCollection(collection) if not allSlots else []
+        for bank in banks:
+            for index in range(bank * 128, (bank + 1) * 128):
+                if index in ignore:
+                    continue
+                dataDict[index] = data
+        self.addBatchRawSoundData(dataDict, collection=collection)
 
     def initSound(self, index, collection):
         self.addRawSoundData([p.default for p in Parameters.parameterData], collection=collection, index=index)
@@ -1129,8 +1363,8 @@ class BlofeldDB(QtCore.QObject):
         return self.getAlternateNameChrs(uid, name)
 
     def duplicateSound(self, uid, collection=None, target=-1, rename=True):
-        fieldList = [':{}'.format(p) for p in _parameterList]
-        self.query.prepare('SELECT {}, reference.tags FROM sounds,reference WHERE sounds.uid=:uid AND reference.uid=:uid2'.format(', '.join('sounds.' + p for p in _parameterList)))
+        fieldList = [':{}'.format(p) for p in parameterList]
+        self.query.prepare('SELECT {}, reference.tags FROM sounds,reference WHERE sounds.uid=:uid AND reference.uid=:uid2'.format(', '.join('sounds.' + p for p in parameterList)))
         self.query.bindValue(':uid', uid)
         self.query.bindValue(':uid2', uid)
         if not self.query.exec_():
@@ -1143,7 +1377,7 @@ class BlofeldDB(QtCore.QObject):
             newNameChrs = self.getAlternateNameChrs(uid, getName(values[363:379]))
             for i, chr in enumerate(newNameChrs, 363):
                 values[i] = chr2ord[chr]
-        self.query.prepare('INSERT INTO sounds({}, uid) VALUES({}, :uid)'.format(', '.join(_parameterList), ', '.join(fieldList)))
+        self.query.prepare('INSERT INTO sounds({}, uid) VALUES({}, :uid)'.format(', '.join(parameterList), ', '.join(fieldList)))
         for p, value in zip(fieldList, values):
             self.query.bindValue(p, value)
         newUid = str(uuid.uuid4())
@@ -1173,11 +1407,11 @@ class BlofeldDB(QtCore.QObject):
         return newUid
 
     def addSoundsToCollection(self, uidMap, collection):
-        fieldList = [':{}'.format(p) for p in _parameterList]
-        prepareStr = 'SELECT {}, reference.tags FROM sounds,reference WHERE sounds.uid=:uid AND reference.uid=:uid2'.format(', '.join('sounds.' + p for p in _parameterList))
+        fieldList = [':{}'.format(p) for p in parameterList]
+        prepareStr = 'SELECT {}, reference.tags FROM sounds,reference WHERE sounds.uid=:uid AND reference.uid=:uid2'.format(', '.join('sounds.' + p for p in parameterList))
         reader = QtSql.QSqlQuery()
         reader.prepare(prepareStr)
-        insertPrepare = 'INSERT INTO sounds({}, uid) VALUES({}, :uid)'.format(', '.join(_parameterList), ', '.join(fieldList))
+        insertPrepare = 'INSERT INTO sounds({}, uid) VALUES({}, :uid)'.format(', '.join(parameterList), ', '.join(fieldList))
 
         splitted = uidMap[:500]
         delta = 0
@@ -1550,6 +1784,8 @@ class BlofeldDB(QtCore.QObject):
 
 
 class CollectionManagerModel(QtSql.QSqlTableModel):
+    updated = QtCore.pyqtSignal()
+
     def __init__(self):
         QtSql.QSqlTableModel.__init__(self)
         self.refresh()
@@ -1559,6 +1795,7 @@ class CollectionManagerModel(QtSql.QSqlTableModel):
         self.select()
         while self.canFetchMore():
             self.fetchMore()
+        self.updated.emit()
 
     @property
     def collections(self):

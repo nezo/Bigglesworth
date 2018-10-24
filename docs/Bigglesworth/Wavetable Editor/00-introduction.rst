@@ -45,7 +45,7 @@ the table) automatically morph themselves to the first keyframe at the beginning
 :subsection:`Transitions, or` :subsection-italic:`Morphs`
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-A _morph_ allows you to have a (not necessarily) smooth transition from a keyframe to the next one.
+A *morph* allows you to have a (not necessarily) smooth transition from a keyframe to the next one.
 
 There are 4 types of transitions in Bigglesworth:
 
@@ -81,3 +81,6 @@ It is obviously possible to import and export wavetables to file: using Bigglesw
 .. _Translate: translate.html
 .. _Spectral: spectral.html
 .. _`SysEx`: ../terminology.html#sysex
+
+.. meta::
+    :icon: wavetables

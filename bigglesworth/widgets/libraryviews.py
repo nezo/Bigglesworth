@@ -1,5 +1,6 @@
 # *-* encoding: utf-8 *-*
 
+import sys
 import json
 from string import uppercase
 from unidecode import unidecode as _unidecode
@@ -12,7 +13,8 @@ from bigglesworth.utils import loadUi, getSysExContents, sanitize, getValidQColo
 from bigglesworth.const import (TagsRole, backgroundRole, foregroundRole, UidColumn, LocationColumn, 
     NameColumn, CatColumn, TagsColumn, FactoryColumn, chr2ord, factoryPresets)
 from bigglesworth.library import CleanLibraryProxy, BankProxy, CatProxy, NameProxy, TagsProxy, MainLibraryProxy
-from bigglesworth.dialogs import SoundTagsEditDialog, MultiSoundTagsEditDialog, RemoveSoundsMessageBox, DeleteSoundsMessageBox, DropDuplicatesMessageBox
+from bigglesworth.dialogs import (SoundTagsEditDialog, MultiSoundTagsEditDialog, RemoveSoundsMessageBox, 
+    DeleteSoundsMessageBox, DropDuplicatesMessageBox, InitEmptySlotsDialog)
 from bigglesworth.dialogs.tags import TagEdit
 from bigglesworth.libs import midifile
 
@@ -235,6 +237,8 @@ class BaseLibraryView(QtWidgets.QTableView):
     dumpFromRequested = QtCore.pyqtSignal(object, object, int, bool)
     #uid, blofeld index/buffer, multi
     dumpToRequested = QtCore.pyqtSignal(object, object, bool)
+    fullDumpCollectionToBlofeldRequested = QtCore.pyqtSignal(str, object)
+    fullDumpBlofeldToCollectionRequested = QtCore.pyqtSignal(str, object)
     dropEventSignal = QtCore.pyqtSignal()
 
     def __init__(self, *args, **kwargs):
@@ -410,6 +414,53 @@ class BaseLibraryView(QtWidgets.QTableView):
             [(stream.readInt32(), stream.readQVariant()) for role in range(stream.readInt32())]
         return sorted(rows)
 
+    def moveCursor(self, action, modifiers):
+        if action in (self.MoveNext, self.MoveRight):
+            index = self.currentIndex()
+            if not index.isValid():
+                return self.model().index(0, 0)
+            row = index.row() + 1
+            nextIndex = index.sibling(row, NameColumn)
+            if isinstance(self, CollectionTableView):
+                rowCount = self.model().rowCount()
+                while not nextIndex.flags() & QtCore.Qt.ItemIsEnabled:
+                    row += 1
+                    if row == rowCount:
+                        break
+                    nextIndex = nextIndex.sibling(row, NameColumn)
+                self.scrollTo(nextIndex)
+            return nextIndex
+        elif action in (self.MovePrevious, self.MoveLeft):
+            index = self.currentIndex()
+            if not index.isValid():
+                return self.model().index(0, 0)
+            row = index.row() - 1
+            prevIndex = index.sibling(row, NameColumn)
+            if isinstance(self, CollectionTableView):
+                while not prevIndex.flags() & QtCore.Qt.ItemIsEnabled:
+                    row -= 1
+                    if row < 0:
+                        break
+                    prevIndex = prevIndex.sibling(row, NameColumn)
+                self.scrollTo(prevIndex)
+            return prevIndex
+        return QtWidgets.QTableView.moveCursor(self, action, modifiers)
+
+    def mouseDoubleClickEvent(self, event):
+        index = self.indexAt(event.pos())
+        if not index.isValid() or index.flags() & QtCore.Qt.ItemIsEnabled:
+            return QtWidgets.QTableView.mouseDoubleClickEvent(self, event)
+        soundIndex = index.row()
+        bank = soundIndex >> 7
+        prog = soundIndex & 127
+        if QtWidgets.QMessageBox.question(self, 'Empty sound slot', 
+            'Do you want to <b>INIT</b> and open the sound at index {}{:03}?'.format(uppercase[bank], prog + 1), 
+            QtWidgets.QMessageBox.Ok|QtWidgets.QMessageBox.Cancel) != QtWidgets.QMessageBox.Ok:
+                return
+        self.database.initSound(soundIndex, self.collection)
+        self.window().soundEditRequested.emit(self.database.getUidFromCollection(bank, prog, self.collection), self.collection)
+        self.setCurrentIndex(index.sibling(index.row(), NameColumn))
+
     def dragEnterEvent(self, event):
         self.dropSelectionIndexes = None
         if not self.editable:
@@ -427,8 +478,9 @@ class BaseLibraryView(QtWidgets.QTableView):
                 self.externalFileDropContents = sysex
             else:
                 event.ignore()
-        elif event.mimeData().hasFormat('application/x-qabstractitemmodeldatalist') and event.source():
-            QtWidgets.QTableView.dragEnterEvent(self, event)
+        elif event.mimeData().hasFormat('application/x-qabstractitemmodeldatalist') and \
+            event.source() and event.mimeData().hasFormat('bigglesworth/collectionItems'):
+                QtWidgets.QTableView.dragEnterEvent(self, event)
         else:
             event.ignore()
 
@@ -445,11 +497,11 @@ class BaseLibraryView(QtWidgets.QTableView):
         stream = QtCore.QDataStream(byteArray, QtCore.QIODevice.WriteOnly)
         for uid in self.getUidFromIndexList(items):
             stream.writeQVariant(uid)
-        mimeData.setData('bigglesworth/collectiondrag', byteArray)
+        mimeData.setData('bigglesworth/collectionItems', byteArray)
         byteArray.clear()
         stream = QtCore.QDataStream(byteArray, QtCore.QIODevice.WriteOnly)
         stream.writeBool(False)
-        mimeData.setData('bigglesworth/dragmode', byteArray)
+        mimeData.setData('bigglesworth/collectionDragMode', byteArray)
 
         itemWidth = self.horizontalHeader().sectionSize(NameColumn)
         itemHeight = self.verticalHeader().sectionSize(0)
@@ -518,6 +570,7 @@ class BaseLibraryView(QtWidgets.QTableView):
 #        elif self.verticalScrollBar().isVisible():
         elif self.verticalScrollBar().maximum():
             #fixes for various scroll functions when items are not valid
+            #some of these have to be moved to moveCursor, maybe?
             if event.key() in (QtCore.Qt.Key_Up, QtCore.Qt.Key_Down):
                 if event.modifiers() == QtCore.Qt.ControlModifier:
                     delta = 1 if event.key() == QtCore.Qt.Key_Down else -1
@@ -697,6 +750,9 @@ class BaseLibraryView(QtWidgets.QTableView):
         while isinstance(self.sourceModel, QtCore.QSortFilterProxyModel):
             self.sourceModel = self.sourceModel.sourceModel()
         QtWidgets.QTableView.setModel(self, model)
+        if isinstance(self, CollectionTableView):
+            self.sourceModel.modelReset.connect(self.checkModelSize)
+            self.sourceModel.updated.connect(self.checkModelSize)
         model.layoutChanged.connect(self.restoreLayout)
         self.restoreLayout()
         libAlert = '<br/><br/><b>WARNING</b>: this could take a lot of time in the full library view! ' \
@@ -728,36 +784,43 @@ class BaseLibraryView(QtWidgets.QTableView):
         selRows = self.selectionModel().selectedRows()
         if not index.isValid() or not index.flags() & QtCore.Qt.ItemIsEnabled or not selRows:
             valid = False
+            if isinstance(self, LibraryTableView):
+                return
 #            return
         else:
             valid = True
         menu = ContextMenu(self)
         menu.setSeparatorsCollapsible(False)
         nameIndex = index.sibling(index.row(), NameColumn)
-        name = nameIndex.data().rstrip()
+        name = nameIndex.data().rstrip() if valid else None
         uid = index.sibling(index.row(), UidColumn).data()
 
         inConn, outConn = QtWidgets.QApplication.instance().connections
 
-        if not selRows or not valid:
+        if (not selRows or not valid) and isinstance(self, CollectionTableView):
             pos = '{}{:03}'.format(uppercase[index.row() >> 7], (index.row() & 127) + 1)
             menu.addSection('Empty slot ' + pos)
-            initAction = menu.addAction('INIT this slot')
+            initAction = menu.addAction(QtGui.QIcon.fromTheme('document-new'), 'INIT this slot')
             initAction.triggered.connect(lambda: self.database.initSound(index.row(), self.collection))
+            initAllAction = menu.addAction(QtGui.QIcon.fromTheme('document-new'), 'INIT all empty slots...')
+            initAllAction.triggered.connect(lambda _, index=index: self.initBanks(index.row() >> 7))
             menu.addSeparator()
-            dumpMenu = menu.addMenu('Dump')
+            dumpMenu = menu.addMenu(QtGui.QIcon(':/images/dump.svg'), 'Dump')
             if not all((inConn, outConn)):
                 dumpMenu.setEnabled(False)
             dumpMenu.setSeparatorsCollapsible(False)
-            dumpMenu.addSection('Receive')
-            dumpFromSoundBuffer = dumpMenu.addAction('Dump from Sound Edit Buffer')
-            dumpFromSoundBuffer.triggered.connect(lambda: self.dumpFromRequested.emit(None, self.collection, index.row(), False))
-            dumpFromIndex = dumpMenu.addAction('Dump from {}'.format(pos))
-            dumpFromIndex.triggered.connect(lambda: self.dumpFromRequested.emit(index.row(), self.collection, index.row(), False))
-            dumpFromMultiMenu = dumpMenu.addMenu('Dump from Multi Edit Buffer')
-            for part in range(16):
-                dumpFromMultiAction = dumpFromMultiMenu.addAction('Part {}'.format(part + 1))
-                dumpFromMultiAction.triggered.connect(lambda _, part=part: self.dumpFromRequested.emit(part, self.collection, index.row(), True))
+            receiveSection = dumpMenu.addSection('Receive')
+            if self.collection not in factoryPresets:
+                dumpFromSoundBuffer = dumpMenu.addAction('Dump from Sound Edit Buffer')
+                dumpFromSoundBuffer.triggered.connect(lambda: self.dumpFromRequested.emit(None, self.collection, index.row(), False))
+                dumpFromIndex = dumpMenu.addAction('Dump from {}'.format(pos))
+                dumpFromIndex.triggered.connect(lambda: self.dumpFromRequested.emit(index.row(), self.collection, index.row(), False))
+                dumpFromMultiMenu = dumpMenu.addMenu('Dump from Multi Edit Buffer')
+                for part in range(16):
+                    dumpFromMultiAction = dumpFromMultiMenu.addAction('Part {}'.format(part + 1))
+                    dumpFromMultiAction.triggered.connect(lambda _, part=part: self.dumpFromRequested.emit(part, self.collection, index.row(), True))
+
+            sendSection = dumpMenu.addSection('Send')
 
         elif len(selRows) == 1:
             if selRows[0].row() != index.row():
@@ -783,15 +846,20 @@ class BaseLibraryView(QtWidgets.QTableView):
 
             if isinstance(self, CollectionTableView):
                 findDuplicatesAction.triggered.connect(lambda: self.findDuplicatesRequested.emit(uid, self.collection))
+
                 receiveSection = dumpMenu.insertSection(sendSection, 'Receive')
-                dumpFromSoundBuffer = QtWidgets.QAction('Dump from Sound Edit Buffer', dumpMenu)
-                dumpFromSoundBuffer.triggered.connect(lambda: self.dumpFromRequested.emit(None, self.collection, index.row(), False))
-                pos = '{}{:03}'.format(uppercase[index.row() >> 7], (index.row() & 127) + 1)
-                dumpFromIndex = QtWidgets.QAction('Dump from {}'.format(pos), dumpMenu)
-                dumpFromIndex.triggered.connect(lambda: self.dumpFromRequested.emit(index.row(), self.collection, index.row(), False))
-                dumpMenu.insertActions(sendSection, [dumpFromSoundBuffer, dumpFromIndex])
-                dumpFromMultiMenu = QtWidgets.QMenu('Dump from Multi Edit Buffer', dumpMenu)
-                dumpMenu.insertMenu(sendSection, dumpFromMultiMenu)
+
+                if self.collection not in factoryPresets:
+                    dumpFromSoundBuffer = QtWidgets.QAction('Dump from Sound Edit Buffer', dumpMenu)
+                    dumpFromSoundBuffer.triggered.connect(lambda: self.dumpFromRequested.emit(None, self.collection, index.row(), False))
+                    pos = '{}{:03}'.format(uppercase[index.row() >> 7], (index.row() & 127) + 1)
+                    dumpFromIndex = QtWidgets.QAction('Dump from {}'.format(pos), dumpMenu)
+                    dumpFromIndex.triggered.connect(lambda: self.dumpFromRequested.emit(index.row(), self.collection, index.row(), False))
+                    dumpMenu.insertActions(sendSection, [dumpFromSoundBuffer, dumpFromIndex])
+                    dumpFromMultiMenu = QtWidgets.QMenu('Dump from Multi Edit Buffer', dumpMenu)
+                    dumpMenu.insertMenu(sendSection, dumpFromMultiMenu)
+                else:
+                    receiveSection.setVisible(False)
 
                 dumpToSoundBuffer = dumpMenu.addAction('Dump to Sound Edit Buffer')
                 dumpToSoundBuffer.triggered.connect(lambda: self.dumpToRequested.emit(uid, None, False))
@@ -800,8 +868,9 @@ class BaseLibraryView(QtWidgets.QTableView):
                 dumpToMultiMenu = dumpMenu.addMenu('Dump to Multi Edit Buffer')
 
                 for part in range(16):
-                    dumpFromMultiAction = dumpFromMultiMenu.addAction('Part {}'.format(part + 1))
-                    dumpFromMultiAction.triggered.connect(lambda _, part=part: self.dumpFromRequested.emit(part, self.collection, index.row(), True))
+                    if self.collection not in factoryPresets:
+                        dumpFromMultiAction = dumpFromMultiMenu.addAction('Part {}'.format(part + 1))
+                        dumpFromMultiAction.triggered.connect(lambda _, part=part: self.dumpFromRequested.emit(part, self.collection, index.row(), True))
                     dumpToMultiAction = dumpToMultiMenu.addAction('Part {}'.format(part + 1))
                     dumpToMultiAction.triggered.connect(lambda _, part=part: self.dumpToRequested.emit(uid, part, True))
 
@@ -843,6 +912,16 @@ class BaseLibraryView(QtWidgets.QTableView):
             uidList = [idx.sibling(idx.row(), UidColumn).data(QtCore.Qt.DisplayRole) for idx in selRows]
             menu.addSection('{} sounds selected'.format(len(selRows)))
 
+            if isinstance(self, CollectionTableView):
+                dumpMenu = menu.addMenu(QtGui.QIcon(':/images/dump.svg'), 'Dump')
+                dumpMenu.setSeparatorsCollapsible(False)
+                if not outConn:
+                    dumpMenu.setEnabled(False)
+
+                if self.collection not in factoryPresets:
+                    receiveSection = dumpMenu.addSection('Receive')
+                sendSection = dumpMenu.addSection('Send')
+
             tagsMenu = menu.addMenu(QtGui.QIcon.fromTheme('tag'), 'Tags')
             tagsMenu.aboutToShow.connect(lambda: self.populateTagsMenu(uidList))
             tagsMenu.addSeparator()
@@ -870,7 +949,28 @@ class BaseLibraryView(QtWidgets.QTableView):
             exportAction.triggered.connect(lambda: self.exportRequested.emit(uidList, self.collection))
             if len(uidList) > 1024:
                 exportAction.setEnabled(False)
+
+        if isinstance(self, CollectionTableView):
+            if len(selRows) > 1:
+                indexes = [self.model().mapToRootSource(i).row() for i in selRows]
+                fromText = toText = 'Dump {} selected sounds...'.format(len(selRows))
+            else:
+                indexes = False
+                fromText = 'Show dump receive dialog...'
+                toText = 'Show dump send dialog...'
+            if self.collection not in factoryPresets:
+                dumpFromAllAction = QtWidgets.QAction(QtGui.QIcon.fromTheme('arrow-left-double'), fromText, dumpMenu)
+                dumpFromAllAction.triggered.connect(lambda: self.fullDumpBlofeldToCollectionRequested.emit(self.collection, indexes))
+                dumpMenu.insertAction(sendSection, dumpFromAllAction)
+            dumpToAllAction = dumpMenu.addAction(QtGui.QIcon.fromTheme('arrow-right-double'), toText)
+            dumpToAllAction.triggered.connect(lambda: self.fullDumpCollectionToBlofeldRequested.emit(self.collection, indexes))
+
         return menu, index, name, uid
+
+    def initBanks(self, bank):
+        banks = InitEmptySlotsDialog(self, bank).exec_()
+        if banks is not None:
+            self.database.initBanks(banks, self.collection, allSlots=False)
 
     def populateTagsMenu(self, uidList):
         menu = self.sender()
@@ -921,10 +1021,12 @@ class LibraryTableView(BaseLibraryView):
 class CollectionTableView(BaseLibraryView):
     dropIntoPen = QtCore.Qt.blue
     dropIntoBrush = QtGui.QBrush(QtGui.QColor(32, 128, 255, 96))
+    emptyBrush = QtGui.QBrush(QtGui.QColor(255, 255, 255, 160))
 
     def __init__(self, *args, **kwargs):
         BaseLibraryView.__init__(self, *args, **kwargs)
         self.setDropIndicatorShown(False)
+        self.menuActive = None
         self.autoScrollTimer = QtCore.QTimer()
         self.autoScrollDelta = 0
         self.autoScrollAccel = 0
@@ -946,6 +1048,56 @@ class CollectionTableView(BaseLibraryView):
         font = self.font()
         font.setBold(True)
         self.cornerButton.setFont(font)
+
+        self.emptyInfoBox = QtGui.QTextDocument(
+            'This collection is empty.\n\n'
+            'Drag sounds from a collection or the Main Library, '
+            'otherwise use the right click menu to create a new sound '
+            'or dump content from your Blofeld.')
+        option = self.emptyInfoBox.defaultTextOption()
+        option.setWrapMode(option.WordWrap)
+        option.setAlignment(QtCore.Qt.AlignCenter)
+        self.emptyInfoBox.setDefaultTextOption(option)
+        self.emptyInfoBoxHCenter = self.emptyInfoBoxVCenter = 0
+        self.preferredInfoBoxWidth = self.fontMetrics().width(self.emptyInfoBox.toPlainText().splitlines()[0]) * 2.5
+
+
+    @property
+    def cachedSize(self):
+        try:
+            return self._cachedSize
+        except:
+            self._cachedSize = None
+            self.checkModelSize()
+            return self._cachedSize
+
+    @cachedSize.setter
+    def cachedSize(self, size):
+        self._cachedSize = size
+
+    def checkModelSize(self):
+        newSize = self.model().size()
+        if newSize != self.cachedSize:
+            #on windows/osx, the paintEvent.rect() does not include the full geometry
+            #so we connect the scrollbars to avoid drawing artifacts on the empty
+            #collection infobox
+            if not 'linux' in sys.platform:
+                #remember, the size might be -1!
+                if newSize > 0:
+                    try:
+                        self.verticalScrollBar().valueChanged.disconnect(self.viewport().update)
+                        self.horizontalScrollBar().valueChanged.disconnect(self.viewport().update)
+                    except:
+                        pass
+                else:
+                    try:
+                        self.verticalScrollBar().valueChanged.connect(self.viewport().update, QtCore.Qt.UniqueConnection)
+                        self.horizontalScrollBar().valueChanged.connect(self.viewport().update, QtCore.Qt.UniqueConnection)
+                    except Exception as e:
+                        print(e)
+        if newSize <= 0:
+            self.parent().clearFilters()
+        self.cachedSize = newSize
 
     def doAutoScroll(self):
         self.verticalScrollBar().setValue(self.verticalScrollBar().value() + self.autoScrollDelta)
@@ -988,7 +1140,11 @@ class CollectionTableView(BaseLibraryView):
         if not res:
             return
         menu, index, name, uid = res
+        self.menuActive = index
         menu.exec_(self.viewport().mapToGlobal(pos))
+        self.menuActive = None
+        #required of MacOS
+        self.update()
 
     def dragEnterEvent(self, event):
         self.checkAutoScroll(event.pos())
@@ -1130,8 +1286,8 @@ class CollectionTableView(BaseLibraryView):
         if self.dropIndicatorPosition == self.OnViewport:
             event.ignore()
             return
-        if event.mimeData().hasFormat('bigglesworth/collectiondrag'):
-            data = event.mimeData().data('bigglesworth/collectiondrag')
+        if event.mimeData().hasFormat('bigglesworth/collectionItems'):
+            data = event.mimeData().data('bigglesworth/collectionItems')
             stream = QtCore.QDataStream(data)
             uidList = []
             while not stream.atEnd():
@@ -1300,6 +1456,42 @@ class CollectionTableView(BaseLibraryView):
                 rect = self.visualRect(self.dropSelectionIndexes[0])
                 rect |= self.visualRect(self.dropSelectionIndexes[0].sibling(self.dropSelectionIndexes[0].row(), TagsColumn))
                 qp.drawLine(rect.x(), rect.top(), rect.width(), rect.top())
+        elif self.menuActive and self.menuActive.isValid() and not self.menuActive.flags() & QtCore.Qt.ItemIsEnabled:
+            viewport = self.viewport()
+            qp = QtGui.QPainter(viewport)
+            qp.setPen(self.dropIntoPen)
+            qp.setBrush(self.dropIntoBrush)
+            left = self.visualRect(self.menuActive.sibling(self.menuActive.row(), NameColumn))
+            right = self.visualRect(self.menuActive.sibling(self.menuActive.row(), TagsColumn))
+            qp.drawRect(left | right)
+        elif not self.menuActive:
+            if self.cachedSize <= 0:
+                viewport = self.viewport()
+                qp = QtGui.QPainter(viewport)
+                qp.setPen(QtCore.Qt.NoPen)
+                qp.setBrush(self.emptyBrush)
+                qp.translate(.5, .5)
+                qp.drawRect(viewport.rect())
+                qp.setPen(self.palette().color(QtGui.QPalette.WindowText))
+                qp.translate(viewport.rect().center().x() - self.emptyInfoBoxHCenter, viewport.rect().center().y() - self.emptyInfoBoxVCenter)
+                self.emptyInfoBox.drawContents(qp, QtCore.QRectF(viewport.rect()))
+            elif not self.model().rowCount():
+                viewport = self.viewport()
+                qp = QtGui.QPainter(viewport)
+                qp.setPen(QtCore.Qt.NoPen)
+                qp.setBrush(self.emptyBrush)
+                qp.translate(.5, .5)
+                qp.drawRect(viewport.rect())
+                qp.setPen(self.palette().color(QtGui.QPalette.WindowText))
+                qp.drawText(viewport.rect(), QtCore.Qt.AlignCenter, 'Current filters return no result')
+
+    def resizeEvent(self, event):
+        BaseLibraryView.resizeEvent(self, event)
+        if not event.size().isEmpty():
+            self.emptyInfoBox.setTextWidth(min(self.viewport().width(), self.preferredInfoBoxWidth))
+            self.emptyInfoBoxHCenter = self.emptyInfoBox.size().width() / 2
+            #add a line height to vertically align slightly above than the center
+            self.emptyInfoBoxVCenter = (self.emptyInfoBox.size().height() + self.fontMetrics().height()) / 2
 
 
 class BaseLibraryWidget(QtWidgets.QWidget):
@@ -1310,6 +1502,8 @@ class BaseLibraryWidget(QtWidgets.QWidget):
     dumpFromRequested = QtCore.pyqtSignal(object, object, int, bool)
     #uid, blofeld index/buffer, multi
     dumpToRequested = QtCore.pyqtSignal(object, object, bool)
+    fullDumpCollectionToBlofeldRequested = QtCore.pyqtSignal(str, object)
+    fullDumpBlofeldToCollectionRequested = QtCore.pyqtSignal(str, object)
 
     def __init__(self, uiPath, parent, collection=None):
         QtWidgets.QWidget.__init__(self, parent)
@@ -1322,6 +1516,8 @@ class BaseLibraryWidget(QtWidgets.QWidget):
         self.collectionView.tagsDelegate.tagClicked.connect(self.setTagFilter)
         self.collectionView.importRequested.connect(lambda uriList: self.importRequested.emit(uriList, self.collection))
         self.editModeBtn = QtWidgets.QPushButton(QtGui.QIcon.fromTheme('edit-rename'), '')
+        self.editModeBtn.setToolTip('Toggle edit mode')
+        self.editModeBtn.setStatusTip('Toggle edit mode to rename sounds or change category')
         self.editModeBtn.setCheckable(True)
         self.collectionView.setCornerWidget(self.editModeBtn)
 
@@ -1350,6 +1546,9 @@ class BaseLibraryWidget(QtWidgets.QWidget):
         self.collectionView.findDuplicatesRequested.connect(self.findDuplicatesRequested)
         self.collectionView.deleteRequested.connect(self.deleteRequested)
         self.collectionView.exportRequested.connect(self.exportRequested)
+        self.collectionView.fullDumpCollectionToBlofeldRequested.connect(self.fullDumpCollectionToBlofeldRequested)
+        self.collectionView.fullDumpBlofeldToCollectionRequested.connect(self.fullDumpBlofeldToCollectionRequested)
+
 
         self.collectionView.dumpToRequested.connect(self.dumpToRequested)
         self.collectionView.dumpFromRequested.connect(self.dumpFromRequested)
@@ -1477,6 +1676,8 @@ class CollectionWidget(BaseLibraryWidget):
 #        self.collectionView.duplicateRequested.connect(self.duplicateRequested)
 #        self.collectionView.deleteRequested.connect(self.deleteRequested)
 
+        self.catCombo.view().setUniformItemSizes(True)
+        self.bankCombo.view().setUniformItemSizes(True)
         self.updateFilterCombos()
         self.filterGroupBox.setEnabled(True if self.model.size() > 0 else False)
 
@@ -1493,6 +1694,12 @@ class CollectionWidget(BaseLibraryWidget):
             self.database.getIndexForUid(uid, self.collection), NameColumn)
         self.collectionView.setCurrentIndex(index)
         self.collectionView.scrollTo(index)
+
+    def focusIndex(self, bank, prog):
+        index = self.collectionView.model().mapFromRootSource((bank << 7) + prog, NameColumn)
+        if index.isValid():
+            self.collectionView.setCurrentIndex(index)
+            self.collectionView.scrollTo(index)
 
     def deleteRequested(self, uidList):
         if RemoveSoundsMessageBox(self, self.collection, self.database.getNamesFromUidList(uidList)).exec_():
@@ -1634,7 +1841,8 @@ class LibraryWidget(BaseLibraryWidget):
     def clearFilters(self):
         self.filterNameEdit.setText('')
         self.filterTagsEdit.setTags()
-        self.hideFactoryChk.setChecked(False)
+        self.locationCombo.setCurrentIndex(0)
+#        self.hideFactoryChk.setChecked(False)
 
     def focusUid(self, uid):
         self.clearFilters()
@@ -1648,7 +1856,7 @@ class LibraryWidget(BaseLibraryWidget):
             pos = index.row()
             tot = self.collectionView.model().rowCount()
             scrollValue = pos * self.collectionView.verticalScrollBar().maximum() / float(tot)
-            self.collectionView.verticalScrollBar().setValue(int(scrollValue))
+            self.collectionView.verticalScrollBar().setValue(int(scrollValue) + 2)
 
     def duplicateRequested(self, uid, source):
         if self.database.duplicateSound(uid):
@@ -1656,6 +1864,6 @@ class LibraryWidget(BaseLibraryWidget):
             self.collectionView.setCurrentIndex(self.model.index(self.model.rowCount() - 1, NameColumn))
 
     def deleteRequested(self, uidList):
-        if DeleteSoundsMessageBox(self, self.database.getNamesFromUidList(uidList)).exec_():
+        if DeleteSoundsMessageBox(self, uidList).exec_():
             self.database.deleteSounds(uidList)
 

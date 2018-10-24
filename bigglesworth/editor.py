@@ -16,7 +16,7 @@ from bigglesworth.midiutils import NoteOffEvent, NoteOnEvent, CtrlEvent, Program
 
 from combo import Combo
 from squarebutton import SquareButton
-from dial import Dial
+from dial import Dial, _Dial
 from slider import Slider
 from frame import Frame
 from stackedwidget import StackedWidget
@@ -130,14 +130,14 @@ class UndoView(QtWidgets.QUndoView):
 
 class FilterRoutingDisplay(QtWidgets.QWidget):
     paralPath = QtGui.QPainterPath()
-    paralPath.moveTo(-2.5, -5)
-    paralPath.lineTo(2.5, 0)
-    paralPath.lineTo(-2.5, 5)
+    paralPath.moveTo(-5, -2.5)
+    paralPath.lineTo(0, 2.5)
+    paralPath.lineTo(5, -2.5)
 
     serialPath = QtGui.QPainterPath()
-    serialPath.moveTo(-5, -2.5)
-    serialPath.lineTo(0, 2.5)
-    serialPath.lineTo(5, -2.5)
+    serialPath.moveTo(-2.5, -5)
+    serialPath.lineTo(2.5, 0)
+    serialPath.lineTo(-2.5, 5)
 
     routingPaths = paralPath, serialPath
 
@@ -452,6 +452,7 @@ class OscShapeWidget(QtWidgets.QWidget):
         if not self.initialized:
             self.__class__.initialized = True
             self.model.dataChanged.connect(self.updateCacheFromModel)
+            self.updateCacheFromModel()
         self.combo.enterEvent = self.comboEnterEvent
         self.combo.leaveEvent = self.comboLeaveEvent
         self.comboView = self.combo.combo.view()
@@ -508,9 +509,13 @@ class OscShapeWidget(QtWidgets.QWidget):
             self.pixmap = None
             self.hide()
 
-    def updateCacheFromModel(self, first, last):
-        rows = set([first.row(), last.row()])
-        for index in range(min(rows), max(rows) + 1):
+    def updateCacheFromModel(self, first=None, last=None):
+        if first is None:
+            rowRange = range(self.model.rowCount())
+        else:
+            rows = set([first.row(), last.row()])
+            rowRange = range(min(rows), max(rows) + 1)
+        for index in rowRange:
             data = self.model.index(index, 5).data()
             if data:
                 pixmap = QtGui.QPixmap()
@@ -574,7 +579,7 @@ class EditorWindow(QtWidgets.QMainWindow):
     closed = QtCore.pyqtSignal()
     importRequested = QtCore.pyqtSignal(object, object)
     openLibrarianRequested = QtCore.pyqtSignal()
-    midiEvent = QtCore.pyqtSignal(object)
+    midiEvent = QtCore.pyqtSignal([object], [object, bool])
     midiConnect = QtCore.pyqtSignal(object, int, bool)
     soundNameChanged = QtCore.pyqtSignal(str)
 
@@ -590,6 +595,7 @@ class EditorWindow(QtWidgets.QMainWindow):
         self.referenceModel = self.database.referenceModel
         self.libraryModel = self.database.libraryModel
 
+        self.maskObject = None
         self.bankBuffer = None
         self.currentUid = None
         self.currentCollection = None
@@ -597,6 +603,7 @@ class EditorWindow(QtWidgets.QMainWindow):
         self.currentBank = None
         self.currentProg = None
         self.setFromDump = False
+        self.canForward = True
 
         inConn, outConn = self.main.connections
         self.editorMenuBar = EditorMenu(self)
@@ -808,6 +815,9 @@ class EditorWindow(QtWidgets.QMainWindow):
 
         self.pianoKeyboard.noteEvent.connect(self.noteEvent)
         self.modSlider.valueChanged.connect(self.modEvent)
+        self.keyNoteOffBtn.clicked.connect(self.allNotesOffEvent)
+        self.keySoundsOffBtn.clicked.connect(self.allSoundsOffEvent)
+        self.pianoKeyboard.focusOutEvent = self.keyboardFocusOutEvent
 
         self.osc1Frame.customContextMenuRequested.connect(self.templateMenu)
         self.osc2Frame.customContextMenuRequested.connect(self.templateMenu)
@@ -876,9 +886,24 @@ class EditorWindow(QtWidgets.QMainWindow):
         self.modMatrixView = None
 #        self.showModMatrix()
 
+        self.keyChanCombo.setValue(min(self.main.chanSend))
+
+        if self.settings.value('saveEditorGeometry', True, bool) and self.settings.contains('editorGeometry'):
+            self.restoreGeometry(self.main.settings.value('editorGeometry'))
+
     def activate(self):
         self.show()
         self.activateWindow()
+
+    def createMaskObject(self):
+        from bigglesworth.firstrun import MaskObject
+        self.maskObject = MaskObject(self)
+        self.maskObject.setVisible(True)
+
+    def destroyMaskObject(self):
+        if self.maskObject:
+            self.maskObject.deleteLater()
+            self.maskObject = None
 
     def expandMixer(self, expand):
         self.ampFrame.setVisible(not expand)
@@ -968,12 +993,26 @@ class EditorWindow(QtWidgets.QMainWindow):
 #        self.ModMatrixView.show()
 
 
-#    def keyPressEvent(self, event):
-#        print(QtWidgets.QApplication.focusWidget())
-#        QtWidgets.QMainWindow.keyPressEvent(self, event)
-#
-#    def keyReleaseEvent(self, event):
-#        QtWidgets.QMainWindow.keyReleaseEvent(self, event)
+    def keyPressEvent(self, event):
+        if not QtWidgets.QApplication.activePopupWidget():
+            self.pianoKeyboard.keyPressEvent(event)
+        else:
+            QtWidgets.QMainWindow.keyPressEvent(self, event)
+
+    def keyReleaseEvent(self, event):
+        if not QtWidgets.QApplication.activePopupWidget():
+            self.pianoKeyboard.keyReleaseEvent(event)
+        else:
+            QtWidgets.QMainWindow.keyReleaseEvent(self, event)
+
+    def focusOutEvent(self, event):
+        if not isinstance(self.focusWidget(), _Dial) and event.reason():
+            self.allNotesOffEvent()
+        QtWidgets.QMainWindow.focusOutEvent(self, event)
+
+    def keyboardFocusOutEvent(self, event):
+        if True:
+            print('me ne fotto')
 
     @property
     def editStatus(self):
@@ -1066,8 +1105,7 @@ class EditorWindow(QtWidgets.QMainWindow):
         if not res:
             return
         if res == showConnectionsAction:
-            dialog = MidiConnectionsDialog(self.main, self)
-            dialog.exec_()
+            MidiConnectionsDialog(self).exec_()
         elif res == progAction:
             setattr(self.main, progActionAttr, progAction.isChecked())
         elif res == ctrlAction:
@@ -1193,8 +1231,8 @@ class EditorWindow(QtWidgets.QMainWindow):
             #for some reason, directly editing the existing palette doesn't work, so we need a copy of it
             palette = QtGui.QPalette(theme.palette)
             for role in (QtGui.QPalette.Inactive, QtGui.QPalette.Active):
-#                palette.setColor(role, QtGui.QPalette.Button, palette.color(role, QtGui.QPalette.Window))
-                palette.setColor(role, QtGui.QPalette.Button, QtGui.QColor(QtCore.Qt.red))
+                palette.setColor(role, QtGui.QPalette.Button, palette.color(role, QtGui.QPalette.Window))
+#                palette.setColor(role, QtGui.QPalette.Button, QtGui.QColor(QtCore.Qt.red))
                 palette.setColor(role, QtGui.QPalette.ButtonText, palette.color(role, QtGui.QPalette.WindowText))
             self.editorMenuBar.setPalette(palette)
         else:
@@ -1219,7 +1257,14 @@ class EditorWindow(QtWidgets.QMainWindow):
         for child in self.findChildren(Frame):
             child.borderColor = theme.frameBorderColor
             child.labelColor = theme.frameLabelColor
-        self.repaint()
+        metrics = QtGui.QFontMetricsF(theme.font)
+        dialWidth = 0
+        filterDials = self.filterEnvelopeFrame.findChildren(Dial)
+        for envDial in filterDials:
+            dialWidth = max(dialWidth, metrics.width(envDial.label) + 2)
+        for envDial in filterDials + self.amplifierEnvelopeFrame.findChildren(Dial):
+            envDial.setFixedWidth(dialWidth)
+#        self.repaint()
 
     def setOctave(self, offset):
         self.pianoKeyboard.firstNote = 12 + offset * 12
@@ -1313,7 +1358,7 @@ class EditorWindow(QtWidgets.QMainWindow):
         parHigh, parLow = divmod(id, 128)
 #        print par_high, par_low, value
 
-        if self.main.ctrlSendState:
+        if self.main.ctrlSendState and self.canForward:
             self.midiEvent.emit(SysExEvent(1, [INIT, IDW, IDE, self.main.blofeldId, SNDP, location, parHigh, parLow, newValue, END]))
             self.midiOutWidget.activate()
         if self.autosave and self.currentUid:
@@ -1385,7 +1430,7 @@ class EditorWindow(QtWidgets.QMainWindow):
 
     def saveAs(self, readOnly=False):
         name = self.display.nameEdit.text()
-        res = SaveSoundAs(self).exec_(name, self.currentCollection if not readOnly else None, readOnly)
+        res = SaveSoundAs(self).exec_(name, self.currentCollection if not readOnly else None, readOnly, self.currentBank, self.currentProg)
         if not res:
             return
         newName, collection, index, uid = res
@@ -1432,50 +1477,55 @@ class EditorWindow(QtWidgets.QMainWindow):
             self.midiInWidget.activate()
         elif event.type == CTRL:
             if event.channel not in self.main.chanReceive:
+                self.bankBuffer = None
                 return
             if event.param == 0:
                 if self.main.progReceiveState:
                     self.bankBuffer = event.value
+                else:
+                    self.bankBuffer = None
                 return
             elif event.param == 1:
-                self.modSlider.blockSignals(True)
                 self.modSlider.setValue(event.value)
-                self.modSlider.blockSignals(False)
                 self.midiInWidget.activate()
             elif event.param in ctrl2sysex:
                 self.midiInWidget.activate()
                 index = ctrl2sysex[event.param]
+                if event.source in self.main.blockForwardPorts:
+                    self.canForward = False
                 self.parameters[index] = event.value
-                self.bankBuffer = None
             elif self.main.ctrlSendState and event.param != 0:
                 self.midiEvent.emit(event)
         elif event.type == SYSEX:
             if event.sysex[:3] == [INIT, IDW, IDE] and event.sysex[4] == SNDP and \
                 self.acceptBlofeldId(event.sysex[3]):
+                    if event.source in self.main.blockForwardPorts:
+                        self.canForward = False
                     id = (event.sysex[6] << 7) + event.sysex[7]
                     setattr(self.parameters, Parameters.parameterData[id].attr, event.sysex[8])
             else:
                 print('unknown SysExEvent received:\n{}', ', '.join('0x{:x}'.format(e) for e in event.sysex))
-
-#                setattr(self.parameters, self.sender().objectName(), value)
-#        print(event.type == NOTE)
-#        if event.type == NOTE
-#        if not self.main.ctrlReceiveState
-#        if event.type == SYSEX:
-#            pass
-#        elif event.type == CTRL:
-#            if event in ctrl2sysex:
-#                self.
-#            print ctrl2sysex[event.data]
+        self.canForward = True
+        self.bankBuffer = None
 
     def noteEvent(self, eventType, note, velocity):
 #        for channel in sorted(self.main.chanSend):
         event = NoteOnEvent if eventType else NoteOffEvent
-        self.midiEvent.emit(event(1, 0, note, velocity))
+        self.midiEvent[object, bool].emit(event(1, self.keyChanCombo.currentIndex, note, velocity), True)
 
     def modEvent(self, value):
 #        for channel in sorted(self.main.chanSend):
-        self.midiEvent.emit(CtrlEvent(1, 0, 1, value))
+        self.midiEvent[object, bool].emit(CtrlEvent(1, self.keyChanCombo.currentIndex, 1, value), True)
+
+    def allNotesOffEvent(self):
+        self.pianoKeyboard.setAllKeysUp()
+        for channel in range(16):
+            self.midiEvent[object, bool].emit(CtrlEvent(1, channel, 123, 0), True)
+
+    def allSoundsOffEvent(self):
+        self.pianoKeyboard.setAllKeysUp()
+        for channel in range(16):
+            self.midiEvent[object, bool].emit(CtrlEvent(1, channel, 120, 0), True)
 
     def editStatusCheck(self, data):
         #TODO verifica meglio il clean!
@@ -1708,14 +1758,36 @@ class EditorWindow(QtWidgets.QMainWindow):
         self.display.setStatusText('{} parameters randomized'.format(len(paramList)))
 
     def closeEvent(self, event):
+        if self._editStatus == self.Modified or self.setFromDump:
+            if self._editStatus == self.Modified:
+                title = 'Sound modified'
+                message = 'The current sound has been modified.\nWhat do you want to do?'
+            else:
+                title = 'Sound dumped'
+                message = 'The current sound has been dumped from the Blofeld.\nWhat do you want to do?'
+            res = QtWidgets.QMessageBox.question(self, title, message, 
+                QtWidgets.QMessageBox.Save|QtWidgets.QMessageBox.Ignore|QtWidgets.QMessageBox.Cancel)
+            if not res or res == QtWidgets.QMessageBox.Cancel:
+                return
+            elif res == QtWidgets.QMessageBox.Save:
+                self.save()
+        if self.main.settings.value('saveEditorGeometry', True, bool):
+            self.main.settings.setValue('editorGeometry', self.saveGeometry())
+        else:
+            self.main.settings.remove('editorGeometry')
         QtWidgets.QMainWindow.closeEvent(self, event)
         self.closed.emit()
 
     def changeEvent(self, event):
         if event.type() == QtCore.QEvent.PaletteChange:
             self.display.setPalette(self.palette())
+        elif event.type() == QtCore.QEvent.ActivationChange:
+            if not self.isActiveWindow():
+                self.allNotesOffEvent()
 
     def resizeEvent(self, event):
+        if self.maskObject:
+            self.maskObject.resize(self.size())
         self.nameEditMask.setGeometry(self.geometry().adjusted(-10, -10, 20, 20))
         width = self.midiSection.width() + self.saveFrame.width() + self.displayLayout.horizontalSpacing()
         self.bigglesworthLogo.setPixmap(self.bigglesworthLogoPixmap.scaledToWidth(width, QtCore.Qt.SmoothTransformation))

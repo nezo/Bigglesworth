@@ -808,7 +808,7 @@ class WaveTransformItem(QtWidgets.QGraphicsWidget):
         try:
             return self.prevItem.index == 63 or self.nextItem.index == self.prevItem.index + 1
         except:
-            print('isContiguous exception?')
+#            print('isContiguous exception?')
             return False
 
     def setPrevItem(self, prevItem):
@@ -2476,6 +2476,11 @@ class WaveScene(QtWidgets.QGraphicsScene):
         self.innerRect = self.sceneRect().adjusted(-pow16, 0, pow16, 0)
         self.setSceneRect(self.sceneRect())
 
+        self.scheduleTimer = QtCore.QTimer()
+        self.scheduleTimer.setInterval(50)
+        self.scheduleTimer.setSingleShot(True)
+        self.scheduleTimer.timeout.connect(self.checkComputedPath)
+
     @property
     def currentKeyFrame(self):
         return self._currentKeyFrame
@@ -2487,9 +2492,14 @@ class WaveScene(QtWidgets.QGraphicsScene):
         self.previousIndex = self.currentIndex
         self.currentIndex = keyFrame.index
 
-    def checkComputedPath(self, transform):
-        if self._currentKeyFrame.prevTransform != transform:
+    def checkComputedPath(self, transform=None):
+        if self.keyFrames.isChanging():
+            self.scheduleTimer.start()
             return
+        if transform and self._currentKeyFrame.prevTransform == transform:
+            return
+        if transform is None:
+            transform = self._currentKeyFrame.prevTransform
         if transform.isValid() and transform.nextIsChanged():
             self.computedWavePath.setValues(transform.valuesAtEnd())
             self.computedWavePath.setVisible(True)
@@ -4343,3 +4353,77 @@ class WaveTableScene(QtWidgets.QGraphicsScene):
             self.selectLeft.setVisible(False)
 
 
+class VirtualWaveTableScene(WaveTableScene):
+    def __init__(self, keyFrames):
+        QtWidgets.QGraphicsScene.__init__(self)
+        self.keyFrames = keyFrames
+
+        self.scaleTransform = QtGui.QTransform().scale(2, .55)
+        self.invertedScale, valid = self.scaleTransform.inverted()
+        self.xRatio = SampleItem.wavePathMaxWidth * .02
+        self.yRatio = SampleItem.wavePathMaxHeight * .02
+
+        self.back = QtWidgets.QGraphicsRectItem(0, 0, SampleItem.wavePathMaxWidth, SampleItem.wavePathMaxHeight)
+        self.back.setZValue(-128)
+        self.back.setX(SampleItem.wavePathMaxWidth * 1.26)
+        self.back.setY(-SampleItem.wavePathMaxHeight * 1.26)
+        self.back.setPen(self.cubePen)
+        self.back.setTransform(self.scaleTransform)
+        self.addItem(self.back)
+
+        self.front = QtWidgets.QGraphicsRectItem(0, 0, SampleItem.wavePathMaxWidth, SampleItem.wavePathMaxHeight)
+        self.front.setPen(self.cubePen)
+        self.front.setTransform(self.scaleTransform)
+        self.addItem(self.front)
+
+        self.highlight.connect(self.updateSlice)
+        self.highlightedItem = None
+        self.highlightedIndex = None
+        self.newIndex = None
+        self.currentSelection = []
+        self.moveRangePrev = self.moveRangeNext = 0
+
+        self.shearTransform = QtGui.QTransform().shear(0, .23)
+
+        self.keyFrameItems = {}
+        self.motionLines = {}
+        self.updateKeyFrames()
+        self.setSceneRect(self.sceneRect().adjusted(-65536, 0, 65536, 0))
+
+#        self.updateQueue = set()
+#        self.queueTimer = QtCore.QTimer()
+#        self.queueTimer.setInterval(25)
+#        self.queueTimer.setSingleShot(True)
+#        self.queueTimer.timeout.connect(self.consumeQueue)
+
+    def rect2Poly(self, rect):
+        return QtGui.QPolygonF([rect.topLeft(), rect.topRight(), rect.bottomRight(), rect.bottomLeft()])
+
+    def getPreview(self):
+        self.updateKeyFrames()
+        pixmap = QtGui.QPixmap(128, 72)
+        pixmap.fill(QtCore.Qt.transparent)
+        qp = QtGui.QPainter(pixmap)
+        qp.setRenderHints(qp.Antialiasing)
+        if len(self.keyFrames) == 1:
+            targetRect = QtCore.QRectF(0, 4, 128, 64)
+            qp.setPen(WaveScene.wavePen)
+            wavePath = self.keyFrames[0].wavePath
+            scale = QtGui.QTransform()
+            #for some reason, using QRectF doesn't work
+            QtGui.QTransform.quadToQuad(self.rect2Poly(wavePath.boundingRect()), self.rect2Poly(targetRect), scale)
+            qp.setTransform(scale)
+            qp.drawPath(wavePath)
+        else:
+            targetRect = QtCore.QRectF(0, 0, 128, 64)
+            sourceRect = self.front.sceneBoundingRect()
+            sourceRect |= self.back.sceneBoundingRect()
+            qp.setTransform(self.shearTransform)
+            qp.translate(0, -10)
+            self.render(qp, targetRect, sourceRect)
+        qp.end()
+        byteArray = QtCore.QByteArray()
+        buffer = QtCore.QBuffer(byteArray)
+        pixmap.save(buffer, 'PNG', 32)
+#        print('img size: {}'.format(byteArray.size()))
+        return byteArray

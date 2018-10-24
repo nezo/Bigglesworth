@@ -6,7 +6,14 @@ from bigglesworth.version import __version__
 
 QtCore.pyqtProperty = QtCore.Property
 
-thanksto = 'Fabio "Faber" Vescarelli', 'Benedetto Schiavone', 'Nick Sherman', 'Piet Wagner'
+helpers = 'Fabio "Faber" Vescarelli', 'Benedetto Schiavone', 
+contributors = 'Thibault Appourchaux', 
+testers = 'Don Petersen', 
+donors = (
+    'Nick Sherman', 'Piet Wagner', 'Arnaud Pecqueur', 'Pierre Letzelter', 'David Stanton'
+)
+
+thanksto = helpers + contributors + testers + donors
 
 def makeCoordProp(gradName):
     def getterX(self):
